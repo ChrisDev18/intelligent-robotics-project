@@ -14,14 +14,15 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
+        (os.path.join('share', package_name, 'urdf'), glob('urdf/*.xacro')),
         (os.path.join('share', package_name, 'models/diff_bot'), glob('models/diff_bot/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='christopher-wilson',
     maintainer_email='christopher-wilson@todo.todo',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    description='TurtleBot3 Manipulation simulation bringup and task management for Intelligent Robotics',
+    license='Apache-2.0',
     extras_require={
         'test': [
             'pytest',
@@ -29,7 +30,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'task_manager = robot_bringup.task_manager:main'
+            'task_manager = robot_bringup.task_manager:main',
+            'test_robot = robot_bringup.test_robot:main',
         ],
     },
 )
