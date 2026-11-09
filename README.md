@@ -8,7 +8,6 @@ A modular **ROS 2** and **Gazebo Harmonic** simulation project featuring a **Tur
 ```text
 .gitignore                        # Version control ignore rules for build, log, and cache artifacts
 README.md                         # Complete project documentation and guide
-turtlebot3_manipulation.repos     # Repository list for cloning ROBOTIS TurtleBot3 Manipulation packages
 src/
 ├── turtlebot3_manipulation/      # Cloned ROBOTIS TurtleBot3 Manipulation packages (jazzy branch)
 │
