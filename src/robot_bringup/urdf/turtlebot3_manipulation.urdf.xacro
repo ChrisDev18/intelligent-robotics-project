@@ -6,7 +6,7 @@
   <xacro:arg name="fake_sensor_commands" default="false" />
 
   <!-- Include official ROBOTIS TurtleBot3 Manipulation materials and URDF macros -->
-  <xacro:include filename="$(find turtlebot3_manipulation_description)/urdf/materials.xacro" />
+  <xacro:include filename="$(find turtlebot3_manipulation_description)/gazebo/materials.xacro" />
   <xacro:include filename="$(find turtlebot3_manipulation_description)/urdf/turtlebot3_waffle_pi.urdf.xacro" />
   <xacro:include filename="$(find turtlebot3_manipulation_description)/urdf/open_manipulator_x.urdf.xacro" />
 
@@ -60,6 +60,28 @@
     <origin xyz="0 0 0" rpy="${-pi/2} 0 ${-pi/2}" />
   </joint>
   <link name="$(arg prefix)rgbd_camera_optical_frame" />
+
+  <!-- Under-Chassis Vacuum Cleaner Attachment (Square Visual Pad for Task 1 Cleaning) -->
+  <joint name="$(arg prefix)vacuum_joint" type="fixed">
+    <parent link="$(arg prefix)base_link" />
+    <child link="$(arg prefix)vacuum_link" />
+    <origin xyz="-0.040 0.0 -0.005" rpy="0 0 0" />
+  </joint>
+
+  <link name="$(arg prefix)vacuum_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <box size="0.160 0.160 0.006" />
+      </geometry>
+      <material name="blue" />
+    </visual>
+    <inertial>
+      <origin xyz="0 0 0" />
+      <mass value="0.001" />
+      <inertia ixx="1e-6" ixy="0.0" ixz="0.0" iyy="1e-6" iyz="0.0" izz="1e-6" />
+    </inertial>
+  </link>
 
   <!-- Configure Gazebo Harmonic physics, sensors, and plugins -->
   <xacro:turtlebot3_manipulation_gz prefix="$(arg prefix)" />

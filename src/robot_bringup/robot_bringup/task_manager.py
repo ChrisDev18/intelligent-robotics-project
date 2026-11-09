@@ -5,6 +5,7 @@ from geometry_msgs.msg import Twist
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from std_msgs.msg import Bool
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 
@@ -16,6 +17,8 @@ class IntelligentTaskManager(Node):
     def __init__(self):
         super().__init__('intelligent_task_manager')
         self.cmd_publisher_ = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.vacuum_publisher_ = self.create_publisher(Bool, '/vacuum/active', 10)
+        self.vacuum_enabled = False
         self.arm_publisher_ = self.create_publisher(
             JointTrajectory, '/arm_controller/joint_trajectory', 10
         )
@@ -34,10 +37,12 @@ class IntelligentTaskManager(Node):
 
         # TASK 1: Navigate to & Clean Room 1 (Simulated coverage pattern)
         self.get_logger().info('Executing Task 1: Moving to Room 1 for Vacuum Cleaning...')
+        self.set_vacuum(True)
         self.drive_forward(linear_speed=0.2, duration=3.0)
         self.turn(angular_speed=1.5, duration=2.0)
         self.get_logger().info('Vacuum active in Room 1...')
         time.sleep(2.0)
+        self.set_vacuum(False)
 
         # TASK 2: Navigate to Room 2 for Object Pick-up with OpenManipulator-X
         self.get_logger().info('Executing Task 2: Navigating to Room 2 for Object Pick-up...')
@@ -103,6 +108,14 @@ class IntelligentTaskManager(Node):
     def stop_robot(self):
         twist = Twist()
         self.cmd_publisher_.publish(twist)
+
+    def set_vacuum(self, enabled: bool):
+        self.vacuum_enabled = bool(enabled)
+        msg = Bool()
+        msg.data = self.vacuum_enabled
+        self.vacuum_publisher_.publish(msg)
+        state_str = 'ON' if self.vacuum_enabled else 'OFF'
+        self.get_logger().info(f'Under-chassis square vacuum cleaner turned {state_str}.')
 
 
 def main(args=None):

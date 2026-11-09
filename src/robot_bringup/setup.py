@@ -32,6 +32,7 @@ setup(
         'console_scripts': [
             'task_manager = robot_bringup.task_manager:main',
             'test_robot = robot_bringup.test_robot:main',
+            'vacuum_demo = robot_bringup.vacuum_demo:main',
         ],
     },
 )
