@@ -3,7 +3,7 @@ project(home_nav_sim)
 
 find_package(ament_cmake REQUIRED)
 
-install(DIRECTORY launch worlds
+install(DIRECTORY launch worlds config rviz maps
   DESTINATION share/${PROJECT_NAME}
 )
 
