@@ -7,4 +7,8 @@ install(DIRECTORY launch worlds config rviz maps
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(PROGRAMS scripts/frontier_explorer.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()
