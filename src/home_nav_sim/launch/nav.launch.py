@@ -57,7 +57,7 @@ def generate_launch_description():
     # Tell AMCL the robot starts at the map origin facing east (where SLAM began),
     # same as clicking "2D Pose Estimate" there in RViz.
     initial_pose = ExecuteProcess(
-        cmd=['ros2', 'topic', 'pub', '--once', '/initialpose',
+        cmd=['ros2', 'topic', 'pub', '-w', '1', '--times', '3', '-r', '1', '/initialpose',
              'geometry_msgs/msg/PoseWithCovarianceStamped',
              '{header: {frame_id: map}, pose: {pose: {orientation: {w: 1.0}}, '
              'covariance: [0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, '
@@ -82,5 +82,5 @@ def generate_launch_description():
         robot,
         # Wait for the robot, /clock, /scan and /odom before starting Nav2.
         TimerAction(period=15.0, actions=[nav, rviz]),
-        TimerAction(period=35.0, actions=[initial_pose]),
+        TimerAction(period=20.0, actions=[initial_pose]),
     ])
