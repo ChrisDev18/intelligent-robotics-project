@@ -15,11 +15,12 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+from launch.actions import (DeclareLaunchArgument, GroupAction, IncludeLaunchDescription,
+                            TimerAction)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node
+from launch_ros.actions import Node, SetParameter
 from launch_ros.parameter_descriptions import ParameterValue
 from nav2_common.launch import RewrittenYaml
 
@@ -33,10 +34,11 @@ def generate_launch_description():
         source_file=os.path.join(nav2, 'params', 'nav2_params.yaml'),
         param_rewrites={
             'use_sim_time': 'True',
-            'robot_radius': '0.22',
-            'inflation_radius': '0.45',
+            'robot_radius': '0.25',      # a bit bigger: stay out of tight gaps
+            'inflation_radius': '0.55',
             # Gazebo runs well below real time in WSL; allow older transforms.
             'transform_tolerance': '1.0',
+            'xy_goal_tolerance': '0.5',   # exploring: close enough is fine
         },
         convert_types=True,
     )
@@ -56,11 +58,29 @@ def generate_launch_description():
     )
 
     # Nav2 without map_server/AMCL: SLAM provides both the map and the map->odom transform.
-    nav = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(os.path.join(nav2, 'launch', 'navigation_launch.py')),
-        launch_arguments={'use_sim_time': 'True', 'params_file': nav_params,
-                          'autostart': 'True'}.items(),
-    )
+    # Started node by node (same wiring as nav2_bringup's navigation_launch.py) so we can leave
+    # out route_server and docking_server: exploration doesn't use them, and route_server can
+    # hang Nav2's startup waiting for a costmap that only appears once Nav2 is active.
+    tf_remaps = [('/tf', 'tf'), ('/tf_static', 'tf_static')]
+    nav_nodes = [
+        ('nav2_controller', 'controller_server', [('cmd_vel', 'cmd_vel_nav')]),
+        ('nav2_smoother', 'smoother_server', []),
+        ('nav2_planner', 'planner_server', []),
+        ('nav2_behaviors', 'behavior_server', [('cmd_vel', 'cmd_vel_nav')]),
+        ('nav2_velocity_smoother', 'velocity_smoother', [('cmd_vel', 'cmd_vel_nav')]),
+        ('nav2_collision_monitor', 'collision_monitor', []),
+        ('nav2_bt_navigator', 'bt_navigator', []),
+        ('nav2_waypoint_follower', 'waypoint_follower', []),
+    ]
+    nav = GroupAction([
+        SetParameter('use_sim_time', True),
+        *[Node(package=pkg_name, executable=name, name=name, output='screen',
+               parameters=[nav_params], remappings=tf_remaps + extra)
+          for pkg_name, name, extra in nav_nodes],
+        Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
+             name='lifecycle_manager_navigation', output='screen',
+             parameters=[{'autostart': True, 'node_names': [n for _, n, _ in nav_nodes]}]),
+    ])
 
     explorer = Node(
         package='home_nav_sim',

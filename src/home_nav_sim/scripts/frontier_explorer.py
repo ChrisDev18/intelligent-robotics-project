@@ -8,8 +8,10 @@ left. Then it publishes True on /exploration_done (latched) and, by default,
 drives back to where it started.
 
 Parameters
-  min_frontier_size  smallest frontier worth visiting, in cells (default 10)
-  goal_timeout       seconds before giving up on one goal (default 180)
+  min_frontier_size  smallest frontier worth visiting, in cells (default 25)
+  clearance          ignore frontier goals closer than this to obstacles, metres (default 0.45)
+  goal_timeout       seconds before giving up on one goal (default 90)
+  stuck_time         give up on a goal if the robot moves < 0.25 m in this many seconds (default 40)
   blacklist_radius   metres around a failed goal to skip later (default 0.6)
   return_home        drive back to the start pose when done (default true)
   start_delay        sim seconds to wait after the first map before exploring (default 20)
@@ -132,8 +134,12 @@ def main():
     class FrontierExplorer(Node):
         def __init__(self):
             super().__init__('frontier_explorer')
-            self.min_size = self.declare_parameter('min_frontier_size', 10).value
-            self.goal_timeout = self.declare_parameter('goal_timeout', 180.0).value
+            self.min_size = self.declare_parameter('min_frontier_size', 25).value
+            self.clearance = self.declare_parameter('clearance', 0.45).value
+            self.goal_timeout = self.declare_parameter('goal_timeout', 90.0).value
+            self.stuck_time = self.declare_parameter('stuck_time', 40.0).value
+            self.progress_xy = None      # where the robot was when it last made progress
+            self.progress_at = None
             self.blacklist_radius = self.declare_parameter('blacklist_radius', 0.6).value
             self.return_home = self.declare_parameter('return_home', True).value
             self.start_delay = self.declare_parameter('start_delay', 20.0).value
@@ -189,7 +195,9 @@ def main():
             goal = NavigateToPose.Goal()
             goal.pose = PoseStamped()
             goal.pose.header.frame_id = 'map'
-            goal.pose.header.stamp = self.get_clock().now().to_msg()
+            # Time zero = 'use the latest transform'. Stamping with now() asks Nav2 for a
+            # map->odom transform SLAM hasn't published yet, and the goal is rejected.
+            goal.pose.header.stamp = Time().to_msg()
             goal.pose.pose.position.x, goal.pose.pose.position.y = x, y
             goal.pose.pose.orientation.z = math.sin(yaw / 2)
             goal.pose.pose.orientation.w = math.cos(yaw / 2)
@@ -254,19 +262,35 @@ def main():
 
             info = self.map.info
             grid = np.array(self.map.data, dtype=np.int16).reshape(info.height, info.width)
-            clearance = max(1, int(0.25 / info.resolution))   # ~robot radius
+            clearance = max(1, int(round(self.clearance / info.resolution)))
             clusters = find_frontiers(grid, self.min_size, clearance)
 
             # A goal is in progress: give up on it if it timed out.
             if self.goal_xy is not None:
                 if self.goal_handle is None:
                     return   # still waiting for Nav2 to accept it
-                elapsed = (self.get_clock().now() - self.goal_sent_at).nanoseconds / 1e9
-                if elapsed > self.goal_timeout:
-                    self.get_logger().warn('Frontier goal timed out, blacklisting it')
+                elapsed = (now - self.goal_sent_at).nanoseconds / 1e9
+                if self.progress_xy is None or math.hypot(pos[0] - self.progress_xy[0],
+                                                         pos[1] - self.progress_xy[1]) > 0.25:
+                    self.progress_xy, self.progress_at = pos, now
+                stalled = (now - self.progress_at).nanoseconds / 1e9
+                # The lidar often clears a frontier from metres away: if nothing unexplored
+                # is left near the goal, stop driving there and pick the next one.
+                gr, gc = self.to_rc(*self.goal_xy)
+                near = 0.8 / info.resolution
+                if elapsed > 3.0 and not any(abs(r - gr) <= near and abs(cc - gc) <= near
+                                             for cl in clusters for r, cc in cl[::4]):
+                    self.get_logger().info('Goal frontier cleared before arrival, moving on')
+                    self.blacklist_xy.append(self.goal_xy)
+                    self.goal_handle.cancel_goal_async()
+                    return
+                if elapsed > self.goal_timeout or stalled > self.stuck_time:
+                    why = 'timed out' if elapsed > self.goal_timeout else f'stuck for {stalled:.0f} s'
+                    self.get_logger().warn(f'Frontier goal {why}, blacklisting it')
                     self.blacklist_xy.append(self.goal_xy)
                     self.goal_handle.cancel_goal_async()
                 return
+            self.progress_xy = None
 
             robot_rc = self.to_rc(*pos)
             bl_rc = [self.to_rc(x, y) for x, y in self.blacklist_xy]

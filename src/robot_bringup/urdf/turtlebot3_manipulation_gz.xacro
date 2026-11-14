@@ -5,6 +5,13 @@
 
     <!-- Base & Wheel Friction Parameters -->
     <gazebo reference="${prefix}base_link">
+      <visual>
+        <material>
+          <ambient>0.05 0.05 0.05 1.0</ambient>
+          <diffuse>0.05 0.05 0.05 1.0</diffuse>
+          <specular>0.2 0.2 0.2 1.0</specular>
+        </material>
+      </visual>
       <mu1>0.2</mu1>
       <mu2>0.2</mu2>
     </gazebo>
@@ -21,6 +28,13 @@
     </gazebo>
 
     <gazebo reference="${prefix}wheel_left_link">
+      <visual>
+        <material>
+          <ambient>0.05 0.05 0.05 1.0</ambient>
+          <diffuse>0.05 0.05 0.05 1.0</diffuse>
+          <specular>0.2 0.2 0.2 1.0</specular>
+        </material>
+      </visual>
       <mu1>10000.0</mu1>
       <mu2>10000.0</mu2>
       <kp>500000.0</kp>
@@ -31,6 +45,13 @@
     </gazebo>
 
     <gazebo reference="${prefix}wheel_right_link">
+      <visual>
+        <material>
+          <ambient>0.05 0.05 0.05 1.0</ambient>
+          <diffuse>0.05 0.05 0.05 1.0</diffuse>
+          <specular>0.2 0.2 0.2 1.0</specular>
+        </material>
+      </visual>
       <mu1>10000.0</mu1>
       <mu2>10000.0</mu2>
       <kp>500000.0</kp>
@@ -60,6 +81,13 @@
 
     <!-- OpenManipulator-X Link & Gripper Friction Parameters -->
     <gazebo reference="${prefix}link1">
+      <visual>
+        <material>
+          <ambient>0.05 0.05 0.05 1.0</ambient>
+          <diffuse>0.05 0.05 0.05 1.0</diffuse>
+          <specular>0.2 0.2 0.2 1.0</specular>
+        </material>
+      </visual>
       <kp>1000000.0</kp>
       <kd>100.0</kd>
       <mu1>30.0</mu1>
@@ -69,6 +97,13 @@
     </gazebo>
 
     <gazebo reference="${prefix}link2">
+      <visual>
+        <material>
+          <ambient>0.05 0.05 0.05 1.0</ambient>
+          <diffuse>0.05 0.05 0.05 1.0</diffuse>
+          <specular>0.2 0.2 0.2 1.0</specular>
+        </material>
+      </visual>
       <kp>1000000.0</kp>
       <kd>100.0</kd>
       <mu1>30.0</mu1>
@@ -78,6 +113,13 @@
     </gazebo>
 
     <gazebo reference="${prefix}link3">
+      <visual>
+        <material>
+          <ambient>0.05 0.05 0.05 1.0</ambient>
+          <diffuse>0.05 0.05 0.05 1.0</diffuse>
+          <specular>0.2 0.2 0.2 1.0</specular>
+        </material>
+      </visual>
       <kp>1000000.0</kp>
       <kd>100.0</kd>
       <mu1>30.0</mu1>
@@ -87,6 +129,13 @@
     </gazebo>
 
     <gazebo reference="${prefix}link4">
+      <visual>
+        <material>
+          <ambient>0.05 0.05 0.05 1.0</ambient>
+          <diffuse>0.05 0.05 0.05 1.0</diffuse>
+          <specular>0.2 0.2 0.2 1.0</specular>
+        </material>
+      </visual>
       <kp>1000000.0</kp>
       <kd>100.0</kd>
       <mu1>30.0</mu1>
@@ -96,6 +145,13 @@
     </gazebo>
 
     <gazebo reference="${prefix}link5">
+      <visual>
+        <material>
+          <ambient>0.05 0.05 0.05 1.0</ambient>
+          <diffuse>0.05 0.05 0.05 1.0</diffuse>
+          <specular>0.2 0.2 0.2 1.0</specular>
+        </material>
+      </visual>
       <kp>1000000.0</kp>
       <kd>100.0</kd>
       <mu1>30.0</mu1>
@@ -105,6 +161,13 @@
     </gazebo>
 
     <gazebo reference="${prefix}gripper_left_link">
+      <visual>
+        <material>
+          <ambient>0.05 0.05 0.05 1.0</ambient>
+          <diffuse>0.05 0.05 0.05 1.0</diffuse>
+          <specular>0.2 0.2 0.2 1.0</specular>
+        </material>
+      </visual>
       <kp>1000000.0</kp>
       <kd>100.0</kd>
       <mu1>100.0</mu1>
@@ -114,6 +177,13 @@
     </gazebo>
 
     <gazebo reference="${prefix}gripper_right_link">
+      <visual>
+        <material>
+          <ambient>0.05 0.05 0.05 1.0</ambient>
+          <diffuse>0.05 0.05 0.05 1.0</diffuse>
+          <specular>0.2 0.2 0.2 1.0</specular>
+        </material>
+      </visual>
       <kp>1000000.0</kp>
       <kd>100.0</kd>
       <mu1>100.0</mu1>
@@ -150,13 +220,13 @@
         <always_on>true</always_on>
         <visualize>true</visualize>
         <pose>-0.064 0 0 0 0 0</pose>
-        <update_rate>10</update_rate>
+        <update_rate>15</update_rate>
         <topic>scan</topic>
         <gz_frame_id>${prefix}base_scan</gz_frame_id>
         <lidar>
           <scan>
             <horizontal>
-              <samples>360</samples>
+              <samples>720</samples>
               <resolution>1.0</resolution>
               <min_angle>0.0</min_angle>
               <max_angle>6.28319</max_angle>
@@ -164,7 +234,7 @@
           </scan>
           <range>
             <min>0.12</min>
-            <max>10.0</max>
+            <max>12.0</max>
             <resolution>0.015</resolution>
           </range>
           <noise>
@@ -181,14 +251,14 @@
       <sensor name="rgbd_camera" type="rgbd_camera">
         <always_on>true</always_on>
         <visualize>true</visualize>
-        <update_rate>15</update_rate>
+        <update_rate>5</update_rate>
         <topic>rgbd_camera</topic>
         <gz_frame_id>${prefix}rgbd_camera_optical_frame</gz_frame_id>
         <camera>
           <horizontal_fov>1.047</horizontal_fov>
           <image>
-            <width>640</width>
-            <height>480</height>
+            <width>320</width>
+            <height>240</height>
             <format>R8G8B8</format>
           </image>
           <clip>
