@@ -35,6 +35,8 @@ def generate_launch_description():
             'use_sim_time': 'True',
             'robot_radius': '0.22',
             'inflation_radius': '0.45',
+            # Gazebo runs well below real time in WSL; allow older transforms.
+            'transform_tolerance': '1.0',
         },
         convert_types=True,
     )

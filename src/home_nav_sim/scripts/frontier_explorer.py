@@ -12,6 +12,8 @@ Parameters
   goal_timeout       seconds before giving up on one goal (default 180)
   blacklist_radius   metres around a failed goal to skip later (default 0.6)
   return_home        drive back to the start pose when done (default true)
+  start_delay        sim seconds to wait after the first map before exploring (default 20)
+  finish_after       sim seconds with no frontiers before finishing (default 30)
 """
 import math
 from collections import deque
@@ -134,6 +136,8 @@ def main():
             self.goal_timeout = self.declare_parameter('goal_timeout', 180.0).value
             self.blacklist_radius = self.declare_parameter('blacklist_radius', 0.6).value
             self.return_home = self.declare_parameter('return_home', True).value
+            self.start_delay = self.declare_parameter('start_delay', 20.0).value
+            self.finish_after = self.declare_parameter('finish_after', 30.0).value
 
             map_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                                  durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -149,7 +153,9 @@ def main():
             self.goal_xy = None
             self.goal_sent_at = None
             self.blacklist_xy = []
-            self.empty_checks = 0
+            self.first_ready = None      # sim time when map, Nav2 and TF were first all ready
+            self.empty_since = None      # sim time when frontiers first ran out
+            self.retried_blacklist = False
             self.finished = False
             self.create_timer(2.0, self.tick)
             self.get_logger().info('Frontier explorer started, waiting for /map and Nav2...')
@@ -236,6 +242,13 @@ def main():
             if pos is None:
                 self.waiting('no map -> base_footprint transform yet (is SLAM publishing TF?)')
                 return
+            now = self.get_clock().now()
+            if self.first_ready is None:
+                self.first_ready = now
+                self.get_logger().info(
+                    f'Map, Nav2 and TF ready; letting SLAM settle for {self.start_delay:.0f} s')
+            if (now - self.first_ready).nanoseconds / 1e9 < self.start_delay:
+                return
             if self.start_xy is None:
                 self.start_xy = pos
 
@@ -260,11 +273,22 @@ def main():
             choice = choose_frontier(clusters, robot_rc, info.resolution, bl_rc,
                                      blacklist_cells=self.blacklist_radius / info.resolution)
             if choice is None:
-                self.empty_checks += 1
-                if self.empty_checks >= 3:
-                    self.finish()
+                if self.empty_since is None:
+                    self.empty_since = now
+                    self.get_logger().info(f'No frontiers to visit ({len(clusters)} skipped); '
+                                           f'waiting up to {self.finish_after:.0f} s')
+                if (now - self.empty_since).nanoseconds / 1e9 < self.finish_after:
+                    return
+                if self.blacklist_xy and not self.retried_blacklist:
+                    # Goals often fail early (SLAM settling, timing); try them all once more.
+                    self.get_logger().info(f'Retrying {len(self.blacklist_xy)} skipped goals once')
+                    self.blacklist_xy.clear()
+                    self.retried_blacklist = True
+                    self.empty_since = None
+                    return
+                self.finish()
                 return
-            self.empty_checks = 0
+            self.empty_since = None
             (r, c), cluster = choice
             x, y = self.to_xy(r, c)
             yaw = math.atan2(y - pos[1], x - pos[0])
