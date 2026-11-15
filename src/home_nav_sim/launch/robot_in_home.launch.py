@@ -3,6 +3,7 @@
     ros2 launch home_nav_sim robot_in_home.launch.py                  # with walking humans
     ros2 launch home_nav_sim robot_in_home.launch.py humans:=false    # no humans (for SLAM)
     ros2 launch home_nav_sim robot_in_home.launch.py gui:=false       # headless
+    ros2 launch home_nav_sim robot_in_home.launch.py world:=home_tasks.sdf   # task practice world
 
 The Gazebo server and GUI run as two separate processes, so the robot's GPU
 lidar and RGB-D camera don't share an Ogre2 renderer with the GUI window.
@@ -20,8 +21,9 @@ from launch.substitutions import LaunchConfiguration
 
 def _robot(context, *args, **kwargs):
     humans = LaunchConfiguration('humans').perform(context).lower() in ('true', '1', 'yes')
-    world = os.path.join(get_package_share_directory('home_nav_sim'), 'worlds',
-                         'home.sdf' if humans else 'home_no_humans.sdf')
+    world_name = LaunchConfiguration('world').perform(context) or (
+        'home.sdf' if humans else 'home_no_humans.sdf')
+    world = os.path.join(get_package_share_directory('home_nav_sim'), 'worlds', world_name)
     bringup = os.path.join(get_package_share_directory('robot_bringup'),
                            'launch', 'simulation.launch.py')
     # robot_bringup passes `world` into gz_args, so "-s" starts only the server.
@@ -41,6 +43,8 @@ def generate_launch_description():
                          condition=IfCondition(LaunchConfiguration('gui')))
     return LaunchDescription([
         DeclareLaunchArgument('humans', default_value='true'),
+        DeclareLaunchArgument('world', default_value='',
+                              description='World file in home_nav_sim/worlds; overrides humans'),
         DeclareLaunchArgument('gui', default_value='true'),
         DeclareLaunchArgument('start_rviz', default_value='false'),
         DeclareLaunchArgument('x_pose', default_value='19.21'),
