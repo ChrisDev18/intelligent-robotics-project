@@ -237,3 +237,28 @@ When you run `colcon build` and launch the project for the first time, ROS 2 and
 * **`install/` (Workspace Root):** The destination where built packages, symbolic links, share paths, and executables are deployed.
 * **`log/` (Workspace Root):** Stores detailed execution logs for every ROS 2 node (`ros2 run`, launch files) and daemon for debugging node lifecycles.
 * **Gazebo Cache (`~/.cache/gazebosim/` & `~/.ignition/`):** Gazebo downloads standard world files (like `empty.sdf`) and caches physics shaders here upon initial launch.
+
+
+---
+
+## Teammate Task Integration (Room 1 Cleaning & Room 2 Pick-and-Place)
+
+### 1. First-Time Setup After Pulling main
+- Run: python3 src/home_nav_sim/tools/generate_world.py
+- Source ROS 2 Jazzy: source /opt/ros/jazzy/setup.bash
+- Build: colcon build --symlink-install && source install/setup.bash
+
+### 2. ROS 2 Handoff Topics
+- Room 1 (Alpha - Yellow Floor, Vacuum Cleaning):
+  - Subscribe to /room1/ready (std_msgs/msg/Bool, TRANSIENT_LOCAL QoS)
+  - Publish True to /room1/done (std_msgs/msg/Bool) when finished
+  - Controls: /vacuum/active (Bool), /cmd_vel (Twist), navigate_to_pose, /world/empty/create & /world/empty/remove
+- Room 2 (Beta - Mint/Green Floor, Pick & Place):
+  - Subscribe to /room2/ready (std_msgs/msg/Bool, TRANSIENT_LOCAL QoS)
+  - Publish True to /room2/done (std_msgs/msg/Bool) when finished
+  - Controls: /rgbd_camera/image, /rgbd_camera/depth_image, /arm_controller/joint_trajectory (joint1..joint4), /gripper_controller/gripper_cmd (0.018 open / -0.005 close)
+
+### 3. Running Together
+- Terminal 1: ros2 launch home_nav_sim explore.launch.py humans:=false return_home:=false
+- Terminal 2: ros2 run robot_bringup doorway_navigator --ros-args -p wait_for_teammates:=true
+- Terminals 3 & 4: ros2 run robot_bringup <your_room_node>
