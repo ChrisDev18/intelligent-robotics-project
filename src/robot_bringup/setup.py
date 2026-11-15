@@ -30,6 +30,7 @@ setup(
     entry_points={
         'console_scripts': [
             'task_manager = robot_bringup.task_manager:main',
+            'doorway_navigator = robot_bringup.doorway_navigator:main',
             'test_robot = robot_bringup.test_robot:main',
             'vacuum_demo = robot_bringup.vacuum_demo:main',
         ],

@@ -135,7 +135,7 @@ def main():
         def __init__(self):
             super().__init__('frontier_explorer')
             self.min_size = self.declare_parameter('min_frontier_size', 25).value
-            self.clearance = self.declare_parameter('clearance', 0.45).value
+            self.clearance = self.declare_parameter('clearance', 0.65).value
             self.goal_timeout = self.declare_parameter('goal_timeout', 90.0).value
             self.stuck_time = self.declare_parameter('stuck_time', 40.0).value
             self.progress_xy = None      # where the robot was when it last made progress
@@ -148,6 +148,8 @@ def main():
             map_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                                  durability=DurabilityPolicy.TRANSIENT_LOCAL)
             self.create_subscription(OccupancyGrid, '/map', self.on_map, map_qos)
+            self.paused = False
+            self.create_subscription(Bool, '/exploration_pause', self.on_pause, 10)
             self.done_pub = self.create_publisher(Bool, '/exploration_done', map_qos)
             self.nav = ActionClient(self, NavigateToPose, 'navigate_to_pose')
             self.tf_buffer = Buffer()
@@ -169,6 +171,19 @@ def main():
         # --- helpers -------------------------------------------------------
         def on_map(self, msg):
             self.map = msg
+
+        def on_pause(self, msg):
+            want_pause = bool(msg.data)
+            if want_pause and not self.paused:
+                self.paused = True
+                self.get_logger().info('Exploration PAUSED by task_manager.')
+                if self.goal_handle is not None:
+                    self.goal_handle.cancel_goal_async()
+                self.clear_goal()
+            elif not want_pause and self.paused:
+                self.paused = False
+                self.progress_xy = None
+                self.get_logger().info('Exploration RESUMED by task_manager.')
 
         def waiting(self, reason):
             self.get_logger().info(f'Waiting: {reason}', throttle_duration_sec=10.0)
@@ -238,7 +253,7 @@ def main():
 
         # --- main loop -----------------------------------------------------
         def tick(self):
-            if self.finished:
+            if self.finished or self.paused:
                 return
             if self.map is None:
                 self.waiting('no /map from slam_toolbox yet')

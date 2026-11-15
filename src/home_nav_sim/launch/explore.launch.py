@@ -34,8 +34,8 @@ def generate_launch_description():
         source_file=os.path.join(nav2, 'params', 'nav2_params.yaml'),
         param_rewrites={
             'use_sim_time': 'True',
-            'robot_radius': '0.25',      # a bit bigger: stay out of tight gaps
-            'inflation_radius': '0.55',
+            'robot_radius': '0.21',      # a bit bigger: stay out of tight gaps
+            'inflation_radius': '0.38',
             # Gazebo runs well below real time in WSL; allow older transforms.
             'transform_tolerance': '1.0',
             'xy_goal_tolerance': '0.5',   # exploring: close enough is fine
@@ -88,8 +88,8 @@ def generate_launch_description():
         name='frontier_explorer',
         output='screen',
         parameters=[{'use_sim_time': True,
-                     'return_home': ParameterValue(LaunchConfiguration('return_home'),
-                                                   value_type=bool)}],
+                     'return_home': ParameterValue(LaunchConfiguration('return_home'), value_type=bool),
+                     'finish_after': 5.0}],
     )
 
     rviz = Node(
@@ -108,7 +108,7 @@ def generate_launch_description():
         DeclareLaunchArgument('return_home', default_value='true'),
         robot,
         TimerAction(period=10.0, actions=[slam]),
-        TimerAction(period=15.0, actions=[nav, rviz]),
+        TimerAction(period=25.0, actions=[nav, rviz]),
         # The explorer waits for /map, TF and Nav2 by itself; start it last.
-        TimerAction(period=25.0, actions=[explorer]),
+        TimerAction(period=35.0, actions=[explorer]),
     ])

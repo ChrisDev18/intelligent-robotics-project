@@ -46,5 +46,5 @@ def generate_launch_description():
         DeclareLaunchArgument('x_pose', default_value='19.21'),
         DeclareLaunchArgument('y_pose', default_value='0.79'),
         OpaqueFunction(function=_robot),
-        TimerAction(period=5.0, actions=[gui]),
+        TimerAction(period=12.0, actions=[gui]),
     ])
