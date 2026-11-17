@@ -31,6 +31,7 @@ setup(
         'console_scripts': [
             'task_manager = robot_bringup.task_manager:main',
             'doorway_navigator = robot_bringup.doorway_navigator:main',
+            'beta_pick_place = robot_bringup.beta_pick_place:main',
             'test_robot = robot_bringup.test_robot:main',
             'vacuum_demo = robot_bringup.vacuum_demo:main',
         ],

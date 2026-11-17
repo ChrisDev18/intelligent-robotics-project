@@ -7,7 +7,9 @@ install(DIRECTORY launch worlds config rviz maps
   DESTINATION share/${PROJECT_NAME}
 )
 
-install(PROGRAMS scripts/frontier_explorer.py
+install(PROGRAMS
+  scripts/frontier_explorer.py
+  scripts/beta_pick_place.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
