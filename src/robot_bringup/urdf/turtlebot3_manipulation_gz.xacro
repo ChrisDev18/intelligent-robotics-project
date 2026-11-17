@@ -304,6 +304,17 @@
       <plugin filename="libgz_ros2_control-system.so" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
         <parameters>$(find robot_bringup)/config/ros2_controllers.yaml</parameters>
       </plugin>
+
+      <!-- DetachableJoint Plugin for Phase D (Room 2 Beta Pick & Place) -->
+      <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
+        <parent_link>${prefix}link5</parent_link>
+        <child_model>beta_pick_item</child_model>
+        <child_link>link</child_link>
+        <detach_topic>/beta_pick_item/detach</detach_topic>
+        <attach_topic>/beta_pick_item/attach</attach_topic>
+        <output_topic>/beta_pick_item/state</output_topic>
+        <suppress_child_warning>true</suppress_child_warning>
+      </plugin>
     </gazebo>
 
   </xacro:macro>

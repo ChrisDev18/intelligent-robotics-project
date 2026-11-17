@@ -5,6 +5,7 @@ from launch import LaunchDescription
 from launch.actions import (
     AppendEnvironmentVariable,
     DeclareLaunchArgument,
+    ExecuteProcess,
     IncludeLaunchDescription,
     RegisterEventHandler,
 )
@@ -170,10 +171,19 @@ def generate_launch_description():
         output='screen',
     )
 
+    # Detach beta_pick_item immediately after robot spawn so DetachableJoint starts detached
+    initial_detach_beta_item = ExecuteProcess(
+        cmd=[
+            'gz', 'topic', '-t', '/beta_pick_item/detach',
+            '-m', 'gz.msgs.Empty', '-p', 'unused: true',
+        ],
+        output='screen',
+    )
+
     spawn_jsb_after_create = RegisterEventHandler(
         event_handler=OnProcessExit(
             target_action=spawn_robot,
-            on_exit=[joint_state_broadcaster_spawner],
+            on_exit=[initial_detach_beta_item, joint_state_broadcaster_spawner],
         )
     )
 
