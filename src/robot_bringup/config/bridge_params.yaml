@@ -96,3 +96,10 @@
   gz_type_name: "gz.msgs.Empty"
   direction: ROS_TO_GZ
 
+# Evaluation Ground-Truth Model Poses (Gazebo Harmonic -> ROS 2, read-only for evaluation)
+- ros_topic_name: "/eval/gz_dynamic_poses"
+  gz_topic_name: "/world/empty/dynamic_pose/info"
+  ros_type_name: "tf2_msgs/msg/TFMessage"
+  gz_type_name: "gz.msgs.Pose_V"
+  direction: GZ_TO_ROS
+

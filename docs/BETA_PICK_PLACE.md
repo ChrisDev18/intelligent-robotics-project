@@ -11,7 +11,8 @@ This document explains how to run, configure, and integrate the **Room 2 (Beta) 
 | `src/home_nav_sim/scripts/beta_pick_place.py` | Main ROS 2 node implementing the Room 2 (Beta) pick-and-place mission (`ros2 run home_nav_sim beta_pick_place.py`). |
 | `src/robot_bringup/robot_bringup/beta_pick_place.py` | Console-script entry-point wrapper (`ros2 run robot_bringup beta_pick_place`). |
 | `src/robot_bringup/urdf/turtlebot3_manipulation_gz.xacro` | Added `gz-sim-detachable-joint-system` (`DetachableJoint`) plugin connecting `${prefix}link5` (gripper palm) to `beta_pick_item::link`. |
-| `src/robot_bringup/config/bridge_params.yaml` | Bridged `/beta_pick_item/attach` and `/beta_pick_item/detach` (`std_msgs/msg/Empty` $\rightarrow$ `gz.msgs.Empty`). |
+| `src/robot_bringup/config/bridge_params.yaml` | Bridged `/beta_pick_item/attach`, `/beta_pick_item/detach`, and read-only ground truth `/eval/gz_dynamic_poses` (`/world/empty/dynamic_pose/info`). |
+| `src/home_nav_sim/tools/summarize_beta_eval.py` | Standalone CLI to aggregate pickup/placement distance error CSV logs into separate pick and place success rates. |
 | `src/robot_bringup/launch/simulation.launch.py` | Publishes an initial `/beta_pick_item/detach` message immediately after `spawn_robot` exits so the cube starts detached during SLAM/exploration. |
 | `src/home_nav_sim/CMakeLists.txt` & `src/robot_bringup/setup.py` | Registered `beta_pick_place` executables in both packages. |
 
@@ -76,6 +77,13 @@ source install/setup.bash
 | `drop_x` | `-0.23` | Target drop spot $x$ coordinate in `map` / `odom` frame (world `18.98`). |
 | `drop_y` | `8.51` | Target drop spot $y$ coordinate in `map` / `odom` frame (world `9.30`). |
 | `use_visual_servo` | `true` | Refine final heading toward the orange cube using `/rgbd_camera/image`. |
+| `eval_log_path` | `log/beta_pick_place_eval.csv` | CSV file where per-trial pickup & placement distance errors and success flags are appended. |
+| `scenario` | `""` | Optional scenario tag saved in each CSV row (e.g. `nav_no_humans`, `nav_humans`, `practice_world`). |
+| `spawn_x` / `spawn_y` | `19.21` / `0.79` | Robot world spawn coordinates used to map Gazebo ground-truth poses into `map` coordinates for evaluation. |
+| `pick_error_threshold_m` | `0.15` | Max 2D pickup distance error (metres) for `pick_success = True`. |
+| `pick_lift_threshold_m` | `0.08` | Min cube vertical lift $\Delta z$ (metres, ground truth) after `CARRY_POSE` for `pick_success = True`. |
+| `place_error_threshold_m` | `0.27` | Max 2D placement distance error (metres) from `(drop_x, drop_y)` for `place_success = True` (half-width of the `0.54 m` drop zone). |
+| `place_max_z_m` | `0.15` | Max final cube centre height $z$ (metres, ground truth) after retract to verify release onto the floor. |
 
 ---
 
@@ -106,3 +114,34 @@ source install/setup.bash
    * At the moment of attachment, the node records the cube's exact local offset $(\Delta x_{\text{local}}, \Delta y_{\text{local}})$ relative to `base_footprint`.
    * When positioning at the drop spot `(-0.23, 8.51)`, it stops at `(drop_x - dx_local, drop_y - dy_local)` so the held cube center aligns directly over `(-0.23, 8.51)`.
    * The arm then lowers smoothly to `PLACE_POSE = [0.0, 0.50, 0.10, -0.60]`, waits for `/joint_states` to come to a complete stop on the floor so there is no downward velocity or bounce, detaches via `/beta_pick_item/detach`, opens the gripper (`0.018`), folds the arm back to `HOME_POSE`, and reverses `0.25 m` clear of the placed cube.
+
+---
+
+## 4. Evaluation: Pickup & Placement Distance Error Logging
+
+Every run of `beta_pick_place.py` logs **separate pickup and placement distance errors** and **separate pick and place success outcomes**, using Gazebo ground truth (`/eval/gz_dynamic_poses`, read-only and never used by navigation or control) with automatic fallback to ROS TF/odom estimates if the ground-truth bridge is unavailable.
+
+### 4.1 Metrics Recorded Per Trial
+* **Pickup Distance Error (`pickup_distance_error_m`)**: 2D Euclidean distance between the robot's nominal grasp point `GRASP_STANDOFF_M = 0.28 m` ahead of `base_footprint` and the cube's initial centre at grasp time.
+  * `pick_success`: `pickup_distance_error_m <= pick_error_threshold_m` (default `0.15 m`) **and** (when ground truth is available) `cube_lift_delta_z >= pick_lift_threshold_m` (default `0.08 m`).
+* **Placement Distance Error (`placement_distance_error_m`)**: 2D Euclidean distance between the cube's final resting centre (measured *after* retracting the arm and backing clear) and the target drop spot `(drop_x, drop_y)`.
+  * `place_success`: `placement_distance_error_m <= place_error_threshold_m` (default `0.27 m`, matching the `0.54 m × 0.54 m` drop zone half-width) **and** (when ground truth is available) `cube_final_z <= place_max_z_m` (default `0.15 m`).
+* **Overall Mission Success (`mission_success`)**: `pick_success and place_success` (also controls the process exit code `0` vs `1`).
+* **ROS Estimate Comparison**: `pickup_estimated_error_m` and `placement_estimated_error_m` are logged alongside the ground-truth errors so localization drift can be separated from controller accuracy.
+* **Live ROS 2 Topic**: Each trial's full JSON metrics dictionary is published on `/beta_pick_place/eval_metrics` (`std_msgs/msg/String`, `TRANSIENT_LOCAL` QoS).
+
+### 4.2 Running Tagged Trials & Summarising Results
+Run trials with an optional `scenario` tag (rows append automatically to `log/beta_pick_place_eval.csv`):
+```bash
+ros2 run home_nav_sim beta_pick_place.py --ros-args -p scenario:=nav_no_humans
+ros2 run home_nav_sim beta_pick_place.py --ros-args -p scenario:=nav_humans
+```
+
+At the end of every run, the node prints the current trial's errors plus the cumulative **Pick Success Rate**, **Place Success Rate**, **Place | Pick Rate**, and **Overall Mission Success Rate**.
+
+To inspect or re-analyse any CSV log offline (including grouping by scenario or testing stricter thresholds):
+```bash
+python3 src/home_nav_sim/tools/summarize_beta_eval.py log/beta_pick_place_eval.csv
+python3 src/home_nav_sim/tools/summarize_beta_eval.py log/beta_pick_place_eval.csv --by-scenario
+python3 src/home_nav_sim/tools/summarize_beta_eval.py log/beta_pick_place_eval.csv --pick-thresh 0.10 --place-thresh 0.20
+```

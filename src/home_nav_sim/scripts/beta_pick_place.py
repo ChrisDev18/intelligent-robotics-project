@@ -19,7 +19,12 @@ Also supports both Nav2 navigation (when explore.launch.py or nav.launch.py is
 running) and direct odometry waypoint driving (when testing in the stripped-down
 practice world via robot_in_home.launch.py world:=home_tasks.sdf).
 """
+import csv
+from datetime import datetime, timezone
+import json
 import math
+import os
+import statistics
 import sys
 import time
 import numpy as np
@@ -37,13 +42,170 @@ from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Image, JointState
-from std_msgs.msg import Bool, Empty
+from std_msgs.msg import Bool, Empty, String
+from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer, TransformListener
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 
+EVAL_CSV_COLUMNS = [
+    'timestamp_utc',
+    'trial_id',
+    'scenario',
+    'pose_source',
+    'box_target_x',
+    'box_target_y',
+    'drop_target_x',
+    'drop_target_y',
+    'pickup_pose_x',
+    'pickup_pose_y',
+    'pickup_pose_yaw',
+    'pickup_grasp_x',
+    'pickup_grasp_y',
+    'cube_initial_x',
+    'cube_initial_y',
+    'cube_initial_z',
+    'cube_lifted_z',
+    'cube_lift_delta_z',
+    'pickup_dx_m',
+    'pickup_dy_m',
+    'pickup_distance_error_m',
+    'pickup_estimated_error_m',
+    'pick_threshold_m',
+    'pick_success',
+    'place_pose_x',
+    'place_pose_y',
+    'place_pose_yaw',
+    'cube_final_x',
+    'cube_final_y',
+    'cube_final_z',
+    'placement_dx_m',
+    'placement_dy_m',
+    'placement_distance_error_m',
+    'placement_estimated_error_m',
+    'place_threshold_m',
+    'place_success',
+    'mission_success',
+    'pick_time_sec',
+    'place_time_sec',
+    'total_time_sec',
+    'failure_reason',
+]
+
+
 def normalize_angle(angle: float) -> float:
     return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def compute_grasp_point(rx: float, ry: float, ryaw: float, standoff_m: float):
+    """Return nominal 2D grasp point (x, y) located `standoff_m` ahead of the robot."""
+    return (
+        rx + standoff_m * math.cos(ryaw),
+        ry + standoff_m * math.sin(ryaw),
+    )
+
+
+def _fmt_float(val, digits: int = 4) -> str:
+    if val is None:
+        return ''
+    return f'{float(val):.{digits}f}'
+
+
+def append_eval_csv(csv_path: str, record: dict) -> int:
+    """Append a single trial record to `csv_path` and return its assigned 1-based trial_id."""
+    parent = os.path.dirname(os.path.abspath(csv_path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    existing_rows = 0
+    file_exists = os.path.isfile(csv_path) and os.path.getsize(csv_path) > 0
+    if file_exists:
+        with open(csv_path, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            existing_rows = sum(1 for _ in reader)
+
+    trial_id = existing_rows + 1
+    record['trial_id'] = trial_id
+
+    row = {}
+    for col in EVAL_CSV_COLUMNS:
+        val = record.get(col, '')
+        if isinstance(val, bool):
+            row[col] = 'True' if val else 'False'
+        elif isinstance(val, float):
+            row[col] = _fmt_float(val, 4)
+        elif val is None:
+            row[col] = ''
+        else:
+            row[col] = str(val)
+
+    with open(csv_path, 'a', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=EVAL_CSV_COLUMNS)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+    return trial_id
+
+
+def summarize_eval_csv(csv_path: str) -> dict:
+    """Compute separate pick, place, conditional place|pick, and overall stats from CSV."""
+    if not os.path.isfile(csv_path):
+        return {'total': 0}
+
+    with open(csv_path, 'r', newline='', encoding='utf-8') as f:
+        rows = list(csv.DictReader(f))
+
+    total = len(rows)
+    if total == 0:
+        return {'total': 0}
+
+    def _to_bool(v) -> bool:
+        return str(v).strip().lower() in ('true', '1', 'yes')
+
+    def _to_float(v):
+        try:
+            s = str(v).strip()
+            return float(s) if s != '' else None
+        except ValueError:
+            return None
+
+    pick_ok = [_to_bool(r.get('pick_success')) for r in rows]
+    place_ok = [_to_bool(r.get('place_success')) for r in rows]
+    mission_ok = [_to_bool(r.get('mission_success')) for r in rows]
+
+    pick_errs = [e for e in (_to_float(r.get('pickup_distance_error_m')) for r in rows) if e is not None]
+    place_errs = [e for e in (_to_float(r.get('placement_distance_error_m')) for r in rows) if e is not None]
+
+    n_pick = sum(pick_ok)
+    n_place = sum(place_ok)
+    n_place_given_pick = sum(1 for pk, pl in zip(pick_ok, place_ok) if pk and pl)
+    n_mission = sum(mission_ok)
+
+    def _err_stats(vals):
+        if not vals:
+            return {'count': 0, 'mean': None, 'std': None, 'min': None, 'max': None}
+        return {
+            'count': len(vals),
+            'mean': statistics.mean(vals),
+            'std': statistics.stdev(vals) if len(vals) > 1 else 0.0,
+            'min': min(vals),
+            'max': max(vals),
+        }
+
+    return {
+        'total': total,
+        'pick_success_count': n_pick,
+        'pick_success_rate': n_pick / total,
+        'place_success_count': n_place,
+        'place_success_rate': n_place / total,
+        'place_given_pick_count': n_place_given_pick,
+        'place_given_pick_rate': (n_place_given_pick / n_pick) if n_pick > 0 else None,
+        'mission_success_count': n_mission,
+        'mission_success_rate': n_mission / total,
+        'pickup_error': _err_stats(pick_errs),
+        'placement_error': _err_stats(place_errs),
+    }
 
 
 class BetaPickAndPlace(Node):
@@ -65,17 +227,29 @@ class BetaPickAndPlace(Node):
 
     # Distance from base_footprint to cube centre when grasping/placing (metres)
     GRASP_STANDOFF_M = 0.28
+    # Nominal resting height of the 0.15 m cube centre on the floor (metres)
+    CUBE_REST_Z_M = 0.075
 
     def __init__(self):
         super().__init__('beta_pick_place')
 
-        # Parameters
+        # Task & Navigation Parameters
         self.declare_parameter('wait_for_ready', False)
         self.declare_parameter('box_x', -6.35)
         self.declare_parameter('box_y', 7.42)
         self.declare_parameter('drop_x', -0.23)
         self.declare_parameter('drop_y', 8.51)
         self.declare_parameter('use_visual_servo', True)
+
+        # Evaluation & Logging Parameters (read-only ground truth; never used for control)
+        self.declare_parameter('spawn_x', 19.21)
+        self.declare_parameter('spawn_y', 0.79)
+        self.declare_parameter('eval_log_path', 'log/beta_pick_place_eval.csv')
+        self.declare_parameter('scenario', '')
+        self.declare_parameter('pick_error_threshold_m', 0.15)
+        self.declare_parameter('pick_lift_threshold_m', 0.08)
+        self.declare_parameter('place_error_threshold_m', 0.27)
+        self.declare_parameter('place_max_z_m', 0.15)
 
         latched_qos = QoSProfile(
             depth=1,
@@ -91,6 +265,9 @@ class BetaPickAndPlace(Node):
         self.attach_pub = self.create_publisher(Empty, '/beta_pick_item/attach', 10)
         self.detach_pub = self.create_publisher(Empty, '/beta_pick_item/detach', 10)
         self.done_pub = self.create_publisher(Bool, '/room2/done', latched_qos)
+        self.eval_pub = self.create_publisher(
+            String, '/beta_pick_place/eval_metrics', latched_qos
+        )
 
         # Action clients
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
@@ -108,11 +285,18 @@ class BetaPickAndPlace(Node):
         self.latest_depth = None
         self.arm_joint_positions = {}
 
+        # Gazebo ground-truth poses (evaluation only, populated via /eval/gz_dynamic_poses)
+        self.gz_robot_pose = None  # (wx, wy, wz, yaw) in Gazebo world frame
+        self.gz_cube_pose = None   # (wx, wy, wz, yaw) in Gazebo world frame
+
         self.create_subscription(Bool, '/room2/ready', self._ready_cb, latched_qos)
         self.create_subscription(Odometry, '/odom', self._odom_cb, 10)
         self.create_subscription(Image, '/rgbd_camera/image', self._rgb_cb, 10)
         self.create_subscription(Image, '/rgbd_camera/depth_image', self._depth_cb, 10)
         self.create_subscription(JointState, '/joint_states', self._joint_state_cb, 10)
+        self.create_subscription(
+            TFMessage, '/eval/gz_dynamic_poses', self._gz_poses_cb, 10
+        )
 
         self.get_logger().info('Beta Pick & Place node initialised.')
 
@@ -141,6 +325,130 @@ class BetaPickAndPlace(Node):
     def _joint_state_cb(self, msg: JointState):
         for name, pos in zip(msg.name, msg.position):
             self.arm_joint_positions[name] = float(pos)
+
+    def _gz_poses_cb(self, msg: TFMessage):
+        """Record Gazebo ground-truth model poses (strictly for evaluation logging)."""
+        for tr in msg.transforms:
+            child = tr.child_frame_id
+            parent = tr.header.frame_id
+            # Only accept top-level world-frame model transforms (not nested link transforms)
+            if parent not in ('empty', 'world', '') or child == parent:
+                continue
+            t = tr.transform.translation
+            q = tr.transform.rotation
+            yaw = math.atan2(
+                2.0 * (q.w * q.z + q.x * q.y),
+                1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+            )
+            pose = (float(t.x), float(t.y), float(t.z), yaw)
+            if child == 'beta_pick_item':
+                self.gz_cube_pose = pose
+            elif child == 'turtlebot3_manipulation':
+                self.gz_robot_pose = pose
+
+    # --- Evaluation Helpers (Read-Only Ground Truth) -------------------------
+    def _world_to_map(self, wx: float, wy: float):
+        spawn_x = float(self.get_parameter('spawn_x').value)
+        spawn_y = float(self.get_parameter('spawn_y').value)
+        return wx - spawn_x, wy - spawn_y
+
+    def has_gz_ground_truth(self) -> bool:
+        return self.gz_robot_pose is not None or self.gz_cube_pose is not None
+
+    def get_gz_robot_pose_map(self):
+        """Return ground-truth robot (map_x, map_y, world_z, yaw) or None."""
+        if self.gz_robot_pose is None:
+            return None
+        wx, wy, wz, yaw = self.gz_robot_pose
+        mx, my = self._world_to_map(wx, wy)
+        return mx, my, wz, yaw
+
+    def get_gz_cube_pose_map(self):
+        """Return ground-truth cube (map_x, map_y, world_z, yaw) or None."""
+        if self.gz_cube_pose is None:
+            return None
+        wx, wy, wz, yaw = self.gz_cube_pose
+        mx, my = self._world_to_map(wx, wy)
+        return mx, my, wz, yaw
+
+    def _record_and_report_eval(self, eval_record: dict):
+        """Append evaluation record to CSV, publish JSON topic, and log cumulative rates."""
+        csv_path = str(self.get_parameter('eval_log_path').value)
+        try:
+            trial_id = append_eval_csv(csv_path, eval_record)
+            summary = summarize_eval_csv(csv_path)
+        except Exception as exc:
+            self.get_logger().error(f'[Eval] Failed writing CSV log ({csv_path}): {exc}')
+            trial_id = eval_record.get('trial_id', 0)
+            summary = {'total': 0}
+
+        # Publish structured JSON metrics for external evaluation nodes
+        try:
+            if rclpy.ok():
+                payload = json.dumps(eval_record, default=str)
+                msg = String(data=payload)
+                for _ in range(2):
+                    self.eval_pub.publish(msg)
+                    self.spin_for(0.05)
+        except Exception:
+            pass
+
+        pk_err = eval_record.get('pickup_distance_error_m')
+        pl_err = eval_record.get('placement_distance_error_m')
+        pk_str = f'{pk_err:.4f} m' if pk_err is not None else 'N/A'
+        pl_str = f'{pl_err:.4f} m' if pl_err is not None else 'N/A'
+
+        self.get_logger().info('-' * 60)
+        self.get_logger().info(
+            f'[Eval] Trial #{trial_id} | source={eval_record.get("pose_source")} | '
+            f'scenario="{eval_record.get("scenario", "")}"'
+        )
+        self.get_logger().info(
+            f'[Eval]   PICK : {"SUCCESS" if eval_record["pick_success"] else "FAIL   "} | '
+            f'dist_err={pk_str} (thresh={eval_record["pick_threshold_m"]:.3f} m) | '
+            f'lift_dz={_fmt_float(eval_record.get("cube_lift_delta_z"), 3) or "N/A"} m'
+        )
+        self.get_logger().info(
+            f'[Eval]   PLACE: {"SUCCESS" if eval_record["place_success"] else "FAIL   "} | '
+            f'dist_err={pl_str} (thresh={eval_record["place_threshold_m"]:.3f} m) | '
+            f'final_z={_fmt_float(eval_record.get("cube_final_z"), 3) or "N/A"} m'
+        )
+        self.get_logger().info(
+            f'[Eval]   TOTAL: {"SUCCESS" if eval_record["mission_success"] else "FAIL   "} | '
+            f'time={_fmt_float(eval_record.get("total_time_sec"), 1)} s | '
+            f'log={os.path.abspath(csv_path)}'
+        )
+
+        if summary.get('total', 0) > 0:
+            n = summary['total']
+            pk_cnt = summary['pick_success_count']
+            pl_cnt = summary['place_success_count']
+            ms_cnt = summary['mission_success_count']
+            pk_stats = summary['pickup_error']
+            pl_stats = summary['placement_error']
+
+            pk_mean = f'{pk_stats["mean"]:.4f}±{pk_stats["std"]:.4f} m' if pk_stats['mean'] is not None else 'N/A'
+            pl_mean = f'{pl_stats["mean"]:.4f}±{pl_stats["std"]:.4f} m' if pl_stats['mean'] is not None else 'N/A'
+            cond_rate = summary['place_given_pick_rate']
+            cond_str = (
+                f'{summary["place_given_pick_count"]}/{pk_cnt} ({100.0 * cond_rate:.1f}%)'
+                if cond_rate is not None else 'N/A'
+            )
+
+            self.get_logger().info(f'[Eval] Cumulative Rates across {n} trial(s):')
+            self.get_logger().info(
+                f'[Eval]   Pick Success Rate       : {pk_cnt}/{n} ({100.0 * summary["pick_success_rate"]:.1f}%) | err={pk_mean}'
+            )
+            self.get_logger().info(
+                f'[Eval]   Place Success Rate      : {pl_cnt}/{n} ({100.0 * summary["place_success_rate"]:.1f}%) | err={pl_mean}'
+            )
+            self.get_logger().info(
+                f'[Eval]   Place | Pick Rate       : {cond_str}'
+            )
+            self.get_logger().info(
+                f'[Eval]   Overall Mission Success : {ms_cnt}/{n} ({100.0 * summary["mission_success_rate"]:.1f}%)'
+            )
+        self.get_logger().info('-' * 60)
 
     # --- Helpers -------------------------------------------------------------
     def spin_for(self, duration_sec: float):
@@ -415,6 +723,59 @@ class BetaPickAndPlace(Node):
         box_y = float(self.get_parameter('box_y').value)
         drop_x = float(self.get_parameter('drop_x').value)
         drop_y = float(self.get_parameter('drop_y').value)
+        pick_thresh = float(self.get_parameter('pick_error_threshold_m').value)
+        pick_lift_thresh = float(self.get_parameter('pick_lift_threshold_m').value)
+        place_thresh = float(self.get_parameter('place_error_threshold_m').value)
+        place_max_z = float(self.get_parameter('place_max_z_m').value)
+        scenario = str(self.get_parameter('scenario').value)
+
+        mission_t0 = time.time()
+        pick_done_t = None
+        failure_reasons = []
+
+        eval_record = {
+            'timestamp_utc': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'trial_id': 0,
+            'scenario': scenario,
+            'pose_source': 'ros_tf_odom_estimate',
+            'box_target_x': box_x,
+            'box_target_y': box_y,
+            'drop_target_x': drop_x,
+            'drop_target_y': drop_y,
+            'pickup_pose_x': None,
+            'pickup_pose_y': None,
+            'pickup_pose_yaw': None,
+            'pickup_grasp_x': None,
+            'pickup_grasp_y': None,
+            'cube_initial_x': box_x,
+            'cube_initial_y': box_y,
+            'cube_initial_z': self.CUBE_REST_Z_M,
+            'cube_lifted_z': None,
+            'cube_lift_delta_z': None,
+            'pickup_dx_m': None,
+            'pickup_dy_m': None,
+            'pickup_distance_error_m': None,
+            'pickup_estimated_error_m': None,
+            'pick_threshold_m': pick_thresh,
+            'pick_success': False,
+            'place_pose_x': None,
+            'place_pose_y': None,
+            'place_pose_yaw': None,
+            'cube_final_x': None,
+            'cube_final_y': None,
+            'cube_final_z': None,
+            'placement_dx_m': None,
+            'placement_dy_m': None,
+            'placement_distance_error_m': None,
+            'placement_estimated_error_m': None,
+            'place_threshold_m': place_thresh,
+            'place_success': False,
+            'mission_success': False,
+            'pick_time_sec': None,
+            'place_time_sec': None,
+            'total_time_sec': None,
+            'failure_reason': '',
+        }
 
         self.get_logger().info('=' * 60)
         self.get_logger().info(
@@ -423,136 +784,321 @@ class BetaPickAndPlace(Node):
         )
         self.get_logger().info('=' * 60)
 
-        # 1. Ensure DetachableJoint starts detached and arm is folded safely
-        self.set_detachable_joint(attach=False)
-        self.control_gripper(self.GRIPPER_OPEN, 'Opening gripper')
-        self.move_arm(self.HOME_POSE, duration_sec=2.0, description='Moving arm to Home Pose')
+        try:
+            # 1. Ensure DetachableJoint starts detached and arm is folded safely
+            self.set_detachable_joint(attach=False)
+            self.control_gripper(self.GRIPPER_OPEN, 'Opening gripper')
+            self.move_arm(self.HOME_POSE, duration_sec=2.0, description='Moving arm to Home Pose')
 
-        # 2. Route into Room 2 (Beta) if currently outside Room 2
-        cur_x, cur_y, _ = self.get_pose()
-        # Room 2 Beta is north of wall y = 6.21 in map frame (world y = 7.0) and east of x = -9.21
-        if cur_y < 6.40 or cur_x < -9.21:
-            if cur_y > 6.40 and cur_x < -9.21:
-                # Currently inside Room 1 (Alpha): exit Door 1 into Hall first
+            # 2. Route into Room 2 (Beta) if currently outside Room 2
+            cur_x, cur_y, _ = self.get_pose()
+            # Room 2 Beta is north of wall y = 6.21 in map frame (world y = 7.0) and east of x = -9.21
+            if cur_y < 6.40 or cur_x < -9.21:
+                if cur_y > 6.40 and cur_x < -9.21:
+                    # Currently inside Room 1 (Alpha): exit Door 1 into Hall first
+                    self.navigate_to_pose(
+                        -14.61, 5.20, -math.pi / 2.0, 'Exit Room 1 Doorway',
+                        fine_align=False, pos_tol=0.15,
+                    )
+                # Go to Hallway south of Door 2 (Beta entrance), then through Door 2
                 self.navigate_to_pose(
-                    -14.61, 5.20, -math.pi / 2.0, 'Exit Room 1 Doorway',
+                    -3.81, 5.20, math.pi / 2.0, 'Beta Doorway Approach (Hall)',
                     fine_align=False, pos_tol=0.15,
                 )
-            # Go to Hallway south of Door 2 (Beta entrance), then through Door 2
+                self.navigate_to_pose(
+                    -3.81, 7.42, math.pi, 'Inside Beta Room Entrance',
+                    fine_align=False, pos_tol=0.12,
+                )
+
+            # 3. Approach the Beta Cube from the East (facing West, yaw = pi)
+            # Stop at box_x + 0.60 first so Nav2 stays outside the static map's
+            # inflation radius around the cube, then close in with closed-loop control.
+            pre_grasp_x = box_x + 0.60
+            pre_grasp_y = box_y
+            grasp_x = box_x + self.GRASP_STANDOFF_M
+            grasp_y = box_y
+            grasp_yaw = math.pi
+
+            if not self.navigate_to_pose(
+                pre_grasp_x, pre_grasp_y, grasp_yaw, 'Pre-Grasp Pose',
+                fine_align=True, pos_tol=0.05,
+            ):
+                self.get_logger().warn('Pre-grasp pose had residual error; continuing to grasp pose.')
+
+            self.move_arm(
+                self.PRE_PICK_POSE, duration_sec=1.8, description='Preparing arm for pick'
+            )
+
+            # Fine approach to exact grasp standoff distance
+            self.drive_to_pose_closed_loop(
+                grasp_x, grasp_y, grasp_yaw, pos_tol=0.02, yaw_tol=0.03, max_lin=0.10
+            )
+            self.align_with_orange_cube_camera(timeout_sec=5.0)
+
+            # 4. Grasp and Attach Cube
+            self.stop_base()
+            self.spin_for(0.4)
+            pick_pose = self.get_pose()
+            if pick_pose is not None:
+                px, py, pyaw = pick_pose
+                # Exact local offset of the cube centre in base_footprint frame at pick time
+                dx_world = box_x - px
+                dy_world = box_y - py
+                held_dx_local = dx_world * math.cos(pyaw) + dy_world * math.sin(pyaw)
+                held_dy_local = -dx_world * math.sin(pyaw) + dy_world * math.cos(pyaw)
+                held_dx_local = max(0.20, min(0.38, held_dx_local))
+                held_dy_local = max(-0.10, min(0.10, held_dy_local))
+            else:
+                held_dx_local = self.GRASP_STANDOFF_M
+                held_dy_local = 0.0
+
+            # --- Evaluation Measurement: Pickup Distance Error (Read-Only) ---
+            use_gt = self.has_gz_ground_truth()
+            eval_record['pose_source'] = (
+                'gz_ground_truth' if use_gt else 'ros_tf_odom_estimate'
+            )
+            if not use_gt:
+                self.get_logger().warn(
+                    '[Eval] /eval/gz_dynamic_poses not received; '
+                    'falling back to ROS TF/odom pose estimate for error logging.'
+                )
+
+            gt_cube_init = self.get_gz_cube_pose_map() if use_gt else None
+            if gt_cube_init is not None:
+                cube_init_x, cube_init_y, cube_init_z, _ = gt_cube_init
+            else:
+                cube_init_x, cube_init_y, cube_init_z = box_x, box_y, self.CUBE_REST_Z_M
+
+            eval_record['cube_initial_x'] = cube_init_x
+            eval_record['cube_initial_y'] = cube_init_y
+            eval_record['cube_initial_z'] = cube_init_z
+
+            if pick_pose is not None:
+                est_gx, est_gy = compute_grasp_point(
+                    pick_pose[0], pick_pose[1], pick_pose[2], self.GRASP_STANDOFF_M
+                )
+                eval_record['pickup_estimated_error_m'] = math.hypot(
+                    est_gx - box_x, est_gy - box_y
+                )
+
+            gt_robot_pick = self.get_gz_robot_pose_map() if use_gt else None
+            if gt_robot_pick is not None:
+                rx, ry, _, ryaw = gt_robot_pick
+            elif pick_pose is not None:
+                rx, ry, ryaw = pick_pose
+            else:
+                rx = ry = ryaw = None
+
+            if rx is not None:
+                eval_record['pickup_pose_x'] = rx
+                eval_record['pickup_pose_y'] = ry
+                eval_record['pickup_pose_yaw'] = ryaw
+                gx, gy = compute_grasp_point(rx, ry, ryaw, self.GRASP_STANDOFF_M)
+                eval_record['pickup_grasp_x'] = gx
+                eval_record['pickup_grasp_y'] = gy
+                eval_record['pickup_dx_m'] = gx - cube_init_x
+                eval_record['pickup_dy_m'] = gy - cube_init_y
+                eval_record['pickup_distance_error_m'] = math.hypot(
+                    eval_record['pickup_dx_m'], eval_record['pickup_dy_m']
+                )
+
+            self.move_arm(self.PICK_POSE, duration_sec=2.5, description='Lowering arm to Pick Pose')
+            self.control_gripper(self.GRIPPER_CLOSED, 'Closing gripper on Beta cube')
+            self.set_detachable_joint(attach=True)
+            self.move_arm(
+                self.CARRY_POSE, duration_sec=2.5, description='Lifting Beta cube to high Carry Pose'
+            )
+            self.spin_for(0.3)
+
+            # --- Evaluation Check: Pick Success (Distance + Lift Verification) ---
+            pick_done_t = time.time()
+            eval_record['pick_time_sec'] = pick_done_t - mission_t0
+
+            pick_dist_err = eval_record['pickup_distance_error_m']
+            pick_dist_ok = pick_dist_err is not None and pick_dist_err <= pick_thresh
+
+            if use_gt:
+                gt_cube_lifted = self.get_gz_cube_pose_map()
+                if gt_cube_lifted is not None:
+                    cube_lifted_z = gt_cube_lifted[2]
+                else:
+                    cube_lifted_z = cube_init_z
+                cube_lift_dz = cube_lifted_z - cube_init_z
+                eval_record['cube_lifted_z'] = cube_lifted_z
+                eval_record['cube_lift_delta_z'] = cube_lift_dz
+                pick_lift_ok = cube_lift_dz >= pick_lift_thresh
+            else:
+                pick_lift_ok = True
+
+            eval_record['pick_success'] = bool(pick_dist_ok and pick_lift_ok)
+            if not pick_dist_ok:
+                failure_reasons.append('pick_distance_exceeded')
+            if not pick_lift_ok:
+                failure_reasons.append('cube_not_lifted')
+
+            self.get_logger().info(
+                f'[Eval][PICK] {"SUCCESS" if eval_record["pick_success"] else "FAIL"} | '
+                f'error={_fmt_float(pick_dist_err, 4) or "N/A"} m '
+                f'(dx={_fmt_float(eval_record["pickup_dx_m"], 4) or "N/A"}, '
+                f'dy={_fmt_float(eval_record["pickup_dy_m"], 4) or "N/A"}, '
+                f'thresh={pick_thresh:.3f} m) | '
+                f'lift_dz={_fmt_float(eval_record["cube_lift_delta_z"], 3) or "N/A"} m'
+            )
+
+            # Back up 0.38 m out of the static map's obstacle inflation zone around
+            # the cube's original position before asking Nav2 to plan to the drop spot.
+            self.get_logger().info('[Base] Backing out of static map cube inflation zone...')
+            self.backup_distance(distance_m=0.38, speed=0.14)
+
+            # 5. Carry Cube to the Beta Drop Spot (-0.23, 8.51)
+            # Route via (-3.81, drop_y) to stay in the clear corridor north of meeting_table
             self.navigate_to_pose(
-                -3.81, 5.20, math.pi / 2.0, 'Beta Doorway Approach (Hall)',
+                -3.81, drop_y, 0.0, 'Room 2 Clear Corridor Waypoint',
                 fine_align=False, pos_tol=0.15,
             )
+
+            # Compute exact robot stop pose so the held cube centre lands dead-centre on (drop_x, drop_y)
+            place_yaw = 0.0
+            place_x = drop_x - (
+                held_dx_local * math.cos(place_yaw) - held_dy_local * math.sin(place_yaw)
+            )
+            place_y = drop_y - (
+                held_dx_local * math.sin(place_yaw) + held_dy_local * math.cos(place_yaw)
+            )
+            pre_drop_x = place_x - 0.28
+            pre_drop_y = place_y
+
             self.navigate_to_pose(
-                -3.81, 7.42, math.pi, 'Inside Beta Room Entrance',
-                fine_align=False, pos_tol=0.12,
+                pre_drop_x, pre_drop_y, place_yaw, 'Pre-Drop Pose',
+                fine_align=True, pos_tol=0.04,
+            )
+            self.drive_to_pose_closed_loop(
+                place_x, place_y, place_yaw, pos_tol=0.015, yaw_tol=0.025, max_lin=0.08
+            )
+            self.stop_base()
+            self.spin_for(0.5)
+
+            # Record robot pose at release for placement estimation comparison
+            est_place_pose = self.get_pose()
+            est_drop_x = est_drop_y = None
+            if est_place_pose is not None:
+                eplx, eply, eplyaw = est_place_pose
+                est_drop_x = eplx + (
+                    held_dx_local * math.cos(eplyaw) - held_dy_local * math.sin(eplyaw)
+                )
+                est_drop_y = eply + (
+                    held_dx_local * math.sin(eplyaw) + held_dy_local * math.cos(eplyaw)
+                )
+                eval_record['placement_estimated_error_m'] = math.hypot(
+                    est_drop_x - drop_x, est_drop_y - drop_y
+                )
+
+            gt_robot_place = self.get_gz_robot_pose_map() if use_gt else None
+            if gt_robot_place is not None:
+                eval_record['place_pose_x'] = gt_robot_place[0]
+                eval_record['place_pose_y'] = gt_robot_place[1]
+                eval_record['place_pose_yaw'] = gt_robot_place[3]
+            elif est_place_pose is not None:
+                eval_record['place_pose_x'] = est_place_pose[0]
+                eval_record['place_pose_y'] = est_place_pose[1]
+                eval_record['place_pose_yaw'] = est_place_pose[2]
+
+            # 6. Lower Arm, Detach Cube on Drop Spot, and Retract
+            self.move_arm(
+                self.PLACE_POSE, duration_sec=3.0, description='Lowering Beta cube gently onto Drop Spot'
+            )
+            self.spin_for(0.5)
+            self.set_detachable_joint(attach=False)
+            self.control_gripper(self.GRIPPER_OPEN, 'Opening gripper to release cube')
+            self.spin_for(0.5)
+
+            self.move_arm(
+                self.HOME_POSE, duration_sec=2.0, description='Retracting arm to Home Pose'
+            )
+            self.backup_distance(distance_m=0.25, speed=0.12)
+            self.spin_for(0.4)
+
+            # --- Evaluation Measurement: Placement Distance Error (After Retract & Settle) ---
+            place_done_t = time.time()
+            eval_record['place_time_sec'] = (
+                (place_done_t - pick_done_t) if pick_done_t is not None else None
             )
 
-        # 3. Approach the Beta Cube from the East (facing West, yaw = pi)
-        # Stop at box_x + 0.60 first so Nav2 stays outside the static map's
-        # inflation radius around the cube, then close in with closed-loop control.
-        pre_grasp_x = box_x + 0.60
-        pre_grasp_y = box_y
-        grasp_x = box_x + self.GRASP_STANDOFF_M
-        grasp_y = box_y
-        grasp_yaw = math.pi
+            if use_gt:
+                gt_cube_final = self.get_gz_cube_pose_map()
+                if gt_cube_final is not None:
+                    cube_final_x, cube_final_y, cube_final_z, _ = gt_cube_final
+                else:
+                    cube_final_x, cube_final_y, cube_final_z = cube_init_x, cube_init_y, cube_init_z
+                eval_record['cube_final_x'] = cube_final_x
+                eval_record['cube_final_y'] = cube_final_y
+                eval_record['cube_final_z'] = cube_final_z
+                eval_record['placement_dx_m'] = cube_final_x - drop_x
+                eval_record['placement_dy_m'] = cube_final_y - drop_y
+                eval_record['placement_distance_error_m'] = math.hypot(
+                    eval_record['placement_dx_m'], eval_record['placement_dy_m']
+                )
+                place_floor_ok = cube_final_z <= place_max_z
+            else:
+                if est_drop_x is not None and est_drop_y is not None:
+                    eval_record['cube_final_x'] = est_drop_x
+                    eval_record['cube_final_y'] = est_drop_y
+                    eval_record['placement_dx_m'] = est_drop_x - drop_x
+                    eval_record['placement_dy_m'] = est_drop_y - drop_y
+                    eval_record['placement_distance_error_m'] = math.hypot(
+                        eval_record['placement_dx_m'], eval_record['placement_dy_m']
+                    )
+                place_floor_ok = True
 
-        if not self.navigate_to_pose(
-            pre_grasp_x, pre_grasp_y, grasp_yaw, 'Pre-Grasp Pose',
-            fine_align=True, pos_tol=0.05,
-        ):
-            self.get_logger().warn('Pre-grasp pose had residual error; continuing to grasp pose.')
+            place_dist_err = eval_record['placement_distance_error_m']
+            place_dist_ok = place_dist_err is not None and place_dist_err <= place_thresh
+            eval_record['place_success'] = bool(place_dist_ok and place_floor_ok)
 
-        self.move_arm(
-            self.PRE_PICK_POSE, duration_sec=1.8, description='Preparing arm for pick'
-        )
+            if not place_dist_ok:
+                failure_reasons.append('place_distance_exceeded')
+            if not place_floor_ok:
+                failure_reasons.append('cube_not_on_floor')
 
-        # Fine approach to exact grasp standoff distance
-        self.drive_to_pose_closed_loop(
-            grasp_x, grasp_y, grasp_yaw, pos_tol=0.02, yaw_tol=0.03, max_lin=0.10
-        )
-        self.align_with_orange_cube_camera(timeout_sec=5.0)
+            self.get_logger().info(
+                f'[Eval][PLACE] {"SUCCESS" if eval_record["place_success"] else "FAIL"} | '
+                f'error={_fmt_float(place_dist_err, 4) or "N/A"} m '
+                f'(dx={_fmt_float(eval_record["placement_dx_m"], 4) or "N/A"}, '
+                f'dy={_fmt_float(eval_record["placement_dy_m"], 4) or "N/A"}, '
+                f'thresh={place_thresh:.3f} m) | '
+                f'final_z={_fmt_float(eval_record["cube_final_z"], 3) or "N/A"} m'
+            )
 
-        # 4. Grasp and Attach Cube
-        self.stop_base()
-        self.spin_for(0.4)
-        pick_pose = self.get_pose()
-        if pick_pose is not None:
-            px, py, pyaw = pick_pose
-            # Exact local offset of the cube centre in base_footprint frame at pick time
-            dx_world = box_x - px
-            dy_world = box_y - py
-            held_dx_local = dx_world * math.cos(pyaw) + dy_world * math.sin(pyaw)
-            held_dy_local = -dx_world * math.sin(pyaw) + dy_world * math.cos(pyaw)
-            held_dx_local = max(0.20, min(0.38, held_dx_local))
-            held_dy_local = max(-0.10, min(0.10, held_dy_local))
-        else:
-            held_dx_local = self.GRASP_STANDOFF_M
-            held_dy_local = 0.0
+            # 7. Publish completion signal so doorway_navigator / mission_manager can proceed
+            for _ in range(3):
+                self.done_pub.publish(Bool(data=True))
+                self.spin_for(0.1)
 
-        self.move_arm(self.PICK_POSE, duration_sec=2.5, description='Lowering arm to Pick Pose')
-        self.control_gripper(self.GRIPPER_CLOSED, 'Closing gripper on Beta cube')
-        self.set_detachable_joint(attach=True)
-        self.move_arm(
-            self.CARRY_POSE, duration_sec=2.5, description='Lifting Beta cube to high Carry Pose'
-        )
+            eval_record['mission_success'] = bool(
+                eval_record['pick_success'] and eval_record['place_success']
+            )
+            self.get_logger().info('=' * 60)
+            self.get_logger().info(
+                f'Phase D: Beta Pick & Place COMPLETE '
+                f'(pick={eval_record["pick_success"]}, place={eval_record["place_success"]}, '
+                f'mission={eval_record["mission_success"]})! (/room2/done published)'
+            )
+            self.get_logger().info('=' * 60)
+            return eval_record['mission_success']
 
-        # Back up 0.38 m out of the static map's obstacle inflation zone around
-        # the cube's original position before asking Nav2 to plan to the drop spot.
-        self.get_logger().info('[Base] Backing out of static map cube inflation zone...')
-        self.backup_distance(distance_m=0.38, speed=0.14)
-
-        # 5. Carry Cube to the Beta Drop Spot (-0.23, 8.51)
-        # Route via (-3.81, drop_y) to stay in the clear corridor north of meeting_table
-        self.navigate_to_pose(
-            -3.81, drop_y, 0.0, 'Room 2 Clear Corridor Waypoint',
-            fine_align=False, pos_tol=0.15,
-        )
-
-        # Compute exact robot stop pose so the held cube centre lands dead-centre on (drop_x, drop_y)
-        place_yaw = 0.0
-        place_x = drop_x - (
-            held_dx_local * math.cos(place_yaw) - held_dy_local * math.sin(place_yaw)
-        )
-        place_y = drop_y - (
-            held_dx_local * math.sin(place_yaw) + held_dy_local * math.cos(place_yaw)
-        )
-        pre_drop_x = place_x - 0.28
-        pre_drop_y = place_y
-
-        self.navigate_to_pose(
-            pre_drop_x, pre_drop_y, place_yaw, 'Pre-Drop Pose',
-            fine_align=True, pos_tol=0.04,
-        )
-        self.drive_to_pose_closed_loop(
-            place_x, place_y, place_yaw, pos_tol=0.015, yaw_tol=0.025, max_lin=0.08
-        )
-        self.stop_base()
-        self.spin_for(0.5)
-
-        # 6. Lower Arm, Detach Cube on Drop Spot, and Retract
-        self.move_arm(
-            self.PLACE_POSE, duration_sec=3.0, description='Lowering Beta cube gently onto Drop Spot'
-        )
-        self.spin_for(0.5)
-        self.set_detachable_joint(attach=False)
-        self.control_gripper(self.GRIPPER_OPEN, 'Opening gripper to release cube')
-        self.spin_for(0.5)
-
-        self.move_arm(
-            self.HOME_POSE, duration_sec=2.0, description='Retracting arm to Home Pose'
-        )
-        self.backup_distance(distance_m=0.25, speed=0.12)
-
-        # 7. Publish completion signal
-        for _ in range(3):
-            self.done_pub.publish(Bool(data=True))
-            self.spin_for(0.1)
-
-        self.get_logger().info('=' * 60)
-        self.get_logger().info('Phase D: Beta Pick & Place COMPLETE! (/room2/done published)')
-        self.get_logger().info('=' * 60)
-        return True
+        except KeyboardInterrupt:
+            failure_reasons.append('interrupted')
+            raise
+        except Exception as exc:
+            failure_reasons.append(f'exception:{type(exc).__name__}')
+            self.get_logger().error(f'Mission failed with exception: {exc}')
+            return False
+        finally:
+            eval_record['total_time_sec'] = time.time() - mission_t0
+            eval_record['mission_success'] = bool(
+                eval_record['pick_success'] and eval_record['place_success']
+            )
+            eval_record['failure_reason'] = '; '.join(failure_reasons)
+            self._record_and_report_eval(eval_record)
 
 
 def main(args=None):
