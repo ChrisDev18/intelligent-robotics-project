@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Generate the home_nav_sim Gazebo Harmonic worlds.
+"""Generate the robot_bringup Gazebo Harmonic worlds.
 
 Edit the lists below (all units in metres, origin = bottom-left outer corner
 of the map, x to the east, y to the north) and run:
 
-    python3 tools/generate_world.py
+    python3 src/robot_bringup/tools/generate_world.py
 
 It writes:
     worlds/home.sdf             - everything, including the 3 walking humans

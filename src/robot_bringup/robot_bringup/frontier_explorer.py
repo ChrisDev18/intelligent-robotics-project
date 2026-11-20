@@ -118,7 +118,7 @@ def choose_frontier(clusters, robot_rc, resolution, blacklist_rc=(), blacklist_c
 # --------------------------------------------------------------------------
 # ROS 2 node
 # --------------------------------------------------------------------------
-def main():
+def main(args=None):
     import rclpy
     from geometry_msgs.msg import PoseStamped
     from nav2_msgs.action import NavigateToPose
@@ -343,7 +343,7 @@ def main():
                 self.get_logger().info('Returning to the start position.')
                 self.send_goal(*self.start_xy)
 
-    rclpy.init()
+    rclpy.init(args=args)
     node = FrontierExplorer()
     try:
         rclpy.spin(node)

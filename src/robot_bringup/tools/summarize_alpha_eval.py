@@ -2,9 +2,9 @@
 """Summarize Alpha Cleaning evaluation CSV logs into coverage and mission metrics.
 
 Examples:
-    python3 src/home_nav_sim/tools/summarize_alpha_eval.py
-    python3 src/home_nav_sim/tools/summarize_alpha_eval.py log/alpha_cleaning_eval.csv --by-scenario
-    python3 src/home_nav_sim/tools/summarize_alpha_eval.py log/alpha_cleaning_eval.csv --cov-thresh 0.90
+    python3 src/robot_bringup/tools/summarize_alpha_eval.py
+    python3 src/robot_bringup/tools/summarize_alpha_eval.py log/alpha_cleaning_eval.csv --by-scenario
+    python3 src/robot_bringup/tools/summarize_alpha_eval.py log/alpha_cleaning_eval.csv --cov-thresh 0.90
 """
 import argparse
 from collections import Counter, defaultdict

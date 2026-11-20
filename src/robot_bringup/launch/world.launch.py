@@ -1,7 +1,7 @@
 """Open the home world in Gazebo Harmonic (ROS 2 Jazzy, Ubuntu 24.04).
 
-    ros2 launch home_nav_sim world.launch.py                 # with walking humans
-    ros2 launch home_nav_sim world.launch.py humans:=false   # empty of people (for SLAM)
+    ros2 launch robot_bringup world.launch.py                 # with walking humans
+    ros2 launch robot_bringup world.launch.py humans:=false   # empty of people (for SLAM)
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -13,7 +13,7 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    pkg = FindPackageShare('home_nav_sim')
+    pkg = FindPackageShare('robot_bringup')
     gz_launch = PathJoinSubstitution([FindPackageShare('ros_gz_sim'), 'launch', 'gz_sim.launch.py'])
 
     humans = LaunchConfiguration('humans')

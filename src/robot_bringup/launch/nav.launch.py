@@ -1,7 +1,7 @@
 """Phase 4: navigate the home world with Nav2 on the saved SLAM map.
 
-    ros2 launch home_nav_sim nav.launch.py                 # no humans (first tests)
-    ros2 launch home_nav_sim nav.launch.py humans:=true    # with walking humans
+    ros2 launch robot_bringup nav.launch.py                 # no humans (first tests)
+    ros2 launch robot_bringup nav.launch.py humans:=true    # with walking humans
 
 Starts the robot at the hall corner, Nav2 (map server, AMCL, planner,
 controller, behaviours) on maps/home_map.yaml, and RViz. The map frame was
@@ -23,7 +23,7 @@ from nav2_common.launch import RewrittenYaml
 
 
 def generate_launch_description():
-    pkg = get_package_share_directory('home_nav_sim')
+    pkg = get_package_share_directory('robot_bringup')
     nav2 = get_package_share_directory('nav2_bringup')
 
     # Nav2's standard Jazzy settings, with only what this robot and map need changed.

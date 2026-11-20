@@ -1,7 +1,7 @@
 """Phase A: the robot explores the unknown home world by itself.
 
-    ros2 launch home_nav_sim explore.launch.py                 # no humans (start here)
-    ros2 launch home_nav_sim explore.launch.py humans:=true    # with walking humans
+    ros2 launch robot_bringup explore.launch.py                 # no humans (start here)
+    ros2 launch robot_bringup explore.launch.py humans:=true    # with walking humans
 
 No map is loaded. slam_toolbox builds the map live, Nav2 drives (planning and
 obstacle avoidance on that growing map) and frontier_explorer keeps sending
@@ -9,7 +9,7 @@ the robot to the edge of the unknown until the whole house is mapped. It then
 publishes True on /exploration_done and drives back to the start.
 
 Save the finished map with:
-    python3 src/home_nav_sim/tools/save_map.py src/home_nav_sim/maps/explored_map
+    ros2 run robot_bringup save_map src/robot_bringup/maps/explored_map
 """
 import os
 
@@ -26,7 +26,7 @@ from nav2_common.launch import RewrittenYaml
 
 
 def generate_launch_description():
-    pkg = get_package_share_directory('home_nav_sim')
+    pkg = get_package_share_directory('robot_bringup')
     nav2 = get_package_share_directory('nav2_bringup')
 
     # Same Nav2 changes as nav.launch.py.
@@ -77,14 +77,26 @@ def generate_launch_description():
         *[Node(package=pkg_name, executable=name, name=name, output='screen',
                parameters=[nav_params], remappings=tf_remaps + extra)
           for pkg_name, name, extra in nav_nodes],
-        Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
-             name='lifecycle_manager_navigation', output='screen',
-             parameters=[{'autostart': True, 'node_names': [n for _, n, _ in nav_nodes]}]),
     ])
 
+    # Start lifecycle_manager a few seconds after the Nav2 servers so FastDDS finishes
+    # matching their lifecycle service endpoints before configure/activate calls are sent.
+    lifecycle_manager = Node(
+        package='nav2_lifecycle_manager',
+        executable='lifecycle_manager',
+        name='lifecycle_manager_navigation',
+        output='screen',
+        parameters=[{
+            'use_sim_time': True,
+            'autostart': True,
+            'bond_timeout': 10.0,
+            'node_names': [n for _, n, _ in nav_nodes],
+        }],
+    )
+
     explorer = Node(
-        package='home_nav_sim',
-        executable='frontier_explorer.py',
+        package='robot_bringup',
+        executable='frontier_explorer',
         name='frontier_explorer',
         output='screen',
         parameters=[{'use_sim_time': True,
@@ -109,6 +121,7 @@ def generate_launch_description():
         robot,
         TimerAction(period=10.0, actions=[slam]),
         TimerAction(period=25.0, actions=[nav, rviz]),
+        TimerAction(period=30.0, actions=[lifecycle_manager]),
         # The explorer waits for /map, TF and Nav2 by itself; start it last.
-        TimerAction(period=35.0, actions=[explorer]),
+        TimerAction(period=38.0, actions=[explorer]),
     ])

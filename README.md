@@ -8,41 +8,84 @@ A modular **ROS 2** and **Gazebo Harmonic** simulation project featuring a **Tur
 ```text
 .gitignore                        # Version control ignore rules for build, log, and cache artifacts
 README.md                         # Complete project documentation and guide
+docs/                             # Additional project guides and documentation
 src/
-├── turtlebot3_manipulation/      # Cloned ROBOTIS TurtleBot3 Manipulation packages (jazzy branch)
+├── turtlebot3_manipulation/      # Cloned ROBOTIS TurtleBot3 Manipulation packages (jazzy branch, gitignored)
 │
-└── robot_bringup/                # Main ROS 2 package root
+└── robot_bringup/                # Unified ROS 2 ament_python package
     ├── config/
-    │   ├── bridge_params.yaml    # Maps Gazebo transport topics to ROS 2 topics
-    │   └── ros2_controllers.yaml # Configuration parameters for ros2_control arm & gripper controllers
+    │   ├── bridge_params.yaml    # Maps Gazebo transport topics/services to ROS 2
+    │   ├── ros2_controllers.yaml # Configuration parameters for ros2_control arm & gripper controllers
+    │   └── slam_toolbox.yaml     # Online async SLAM Toolbox parameters for the home world
     │
     ├── launch/
-    │   └── simulation.launch.py  # Python launch file to start Gazebo, spawn robot, controllers, and ROS 2 bridge
+    │   ├── explore.launch.py     # Live SLAM + Nav2 + autonomous frontier exploration
+    │   ├── nav.launch.py         # Nav2 + AMCL navigation on a saved map
+    │   ├── robot_in_home.launch.py # Spawn TurtleBot3 Manipulation in home world (humans/no_humans/tasks)
+    │   ├── simulation.launch.py  # Core Gazebo Harmonic, URDF, controllers, and ROS 2 bridge
+    │   ├── slam.launch.py        # Manual SLAM mapping + RViz
+    │   └── world.launch.py       # Standalone home world + /clock bridge
     │
-    ├── resource/                 # (EXPLAIN HERE)
+    ├── maps/                     # Saved SLAM occupancy maps (home_map.*, explored_map.*)
     │
-    ├── robot_bringup/            # Inner Python module directory (required for Python packaging)
-    │   ├── __init__.py           # Python package marker (tells Python this folder is an importable package)
-    │   ├── task_manager.py       # High-level task logic node (Room 1 vacuuming & Room 2 pick-up)
-    │   ├── test_robot.py
-    │   └── vacuum_demo.py
+    ├── resource/
+    │   └── robot_bringup         # ament index package resource marker
     │
-    ├── test/                     # Template test modules (NOT YET MODIFIED)
+    ├── robot_bringup/            # Inner Python module directory (all ROS 2 console_scripts)
+    │   ├── __init__.py           # Python package marker
+    │   ├── alpha_cleaning.py     # Phase C: Room 1 (Alpha) vacuum cleaning task node
+    │   ├── beta_pick_place.py    # Phase D: Room 2 (Beta) object pick-and-place task node
+    │   ├── doorway_navigator.py  # Room floor-color discovery + Nav2 doorway handoff controller
+    │   ├── frontier_explorer.py  # Autonomous SLAM frontier exploration (/exploration_done, /exploration_pause)
+    │   ├── save_map.py           # Live /map saver node (.pgm + .yaml)
+    │   ├── task_manager.py       # High-level autonomous mission executive
+    │   ├── test_robot.py         # Full sensor, base, arm & gripper verification node
+    │   └── vacuum_demo.py        # Standalone vacuum cleaner & dirt-hoovering demo
+    │
+    ├── rviz/
+    │   └── slam.rviz             # RViz2 layout for SLAM mapping
+    │
+    ├── test/                     # Standard ament_python template linter tests
+    │
+    ├── tools/                    # Offline non-ROS CLI scripts
+    │   ├── generate_world.py     # Generates worlds/home.sdf & worlds/home_no_humans.sdf
+    │   ├── make_task_world.py    # Generates worlds/home_tasks.sdf from home_no_humans.sdf
+    │   ├── summarize_alpha_eval.py # Aggregates Alpha cleaning evaluation CSV logs
+    │   └── summarize_beta_eval.py  # Aggregates Beta pick-and-place evaluation CSV logs
     │
     ├── urdf/
-    │   ├── turtlebot3_manipulation.urdf.xacro         # Master URDF/Xacro combining Waffle Pi, OpenManipulator-X, and RGB-D camera
-    │   ├── turtlebot3_manipulation_gz.xacro           # Gazebo Harmonic friction, sensors (LiDAR, RGB-D, IMU), and plugins
+    │   ├── turtlebot3_manipulation.urdf.xacro         # Master URDF/Xacro combining Waffle Pi, OpenManipulator-X, RGB-D camera & vacuum pad
+    │   ├── turtlebot3_manipulation_gz.xacro           # Gazebo Harmonic friction, sensors (LiDAR, RGB-D, IMU), DetachableJoint & plugins
     │   └── turtlebot3_manipulation.ros2_control.xacro # gz_ros2_control hardware interfaces for arm and gripper joints
     │
-    ├── package.xml               # ROS 2 package manifest, dependencies, and maintainer info
-    ├── setup.cfg                 # Configures custom installation script paths ($base/lib/robot_bringup)
-    └── setup.py                  # Python setuptools installation script for resource indexing and binaries
+    ├── worlds/                   # Generated Gazebo Harmonic SDF worlds
+    │   ├── home.sdf              # Hall + Room 1 Alpha + Room 2 Beta with furniture & 3 walking humans
+    │   ├── home_no_humans.sdf    # Same world without humans (used for SLAM mapping)
+    │   └── home_tasks.sdf        # Stripped-down walls/floors + Beta cube practice world
+    │
+    ├── LICENSE                   # Apache-2.0 license
+    ├── package.xml               # ROS 2 package manifest & complete audited dependencies
+    ├── setup.cfg                 # Configures script installation paths ($base/lib/robot_bringup)
+    └── setup.py                  # Python setuptools install script for share assets and console_scripts
 ```
 
-Our robot_bringup package was created using standard the ROS 2 CLI command `ros2 pkg create` with the `ament_python` template:
+Our `robot_bringup` package follows the standard ROS 2 CLI `ament_python` template created with `ros2 pkg create`:
 
 ```bash
-ros2 pkg create --build-type ament_python robot_bringup --dependencies rclpy geometry_msgs sensor_msgs nav2_msgs
+ros2 pkg create --build-type ament_python robot_bringup \
+  --license Apache-2.0 \
+  --dependencies \
+    rclpy ament_index_python launch launch_ros python3-numpy \
+    builtin_interfaces std_msgs geometry_msgs sensor_msgs nav_msgs rosgraph_msgs \
+    tf2_msgs tf2_ros trajectory_msgs control_msgs nav2_msgs ros_gz_interfaces \
+    turtlebot3_manipulation_description xacro robot_state_publisher \
+    ros_gz_sim ros_gz_bridge gz_ros2_control controller_manager \
+    ros2_controllers joint_state_broadcaster joint_trajectory_controller gripper_controllers \
+    slam_toolbox nav2_bringup nav2_common nav2_simple_commander \
+    nav2_controller nav2_smoother nav2_planner nav2_behaviors \
+    nav2_velocity_smoother nav2_collision_monitor nav2_bt_navigator \
+    nav2_waypoint_follower nav2_lifecycle_manager nav2_map_server \
+    rviz2 teleop_twist_keyboard
 ```
 
 **Build System:** **`colcon`** (Collection Construct), the standard meta-build tool for ROS 2 workspaces, using symbolic links (`--symlink-install`) so configuration and model files update dynamically without requiring a full rebuild.
@@ -243,22 +286,47 @@ When you run `colcon build` and launch the project for the first time, ROS 2 and
 
 ## Teammate Task Integration (Room 1 Cleaning & Room 2 Pick-and-Place)
 
-### 1. First-Time Setup After Pulling main
-- Run: python3 src/home_nav_sim/tools/generate_world.py
-- Source ROS 2 Jazzy: source /opt/ros/jazzy/setup.bash
-- Build: colcon build --symlink-install && source install/setup.bash
+### 1. First-Time Setup & World Generation
+- Generate worlds (furniture/obstacles + humans, no-humans for SLAM, and task practice world):
+  ```bash
+  python3 src/robot_bringup/tools/generate_world.py
+  python3 src/robot_bringup/tools/make_task_world.py
+  ```
+- Source ROS 2 Jazzy: `source /opt/ros/jazzy/setup.bash`
+- Build: `colcon build --symlink-install --packages-select turtlebot3_manipulation_description robot_bringup && source install/setup.bash`
 
-### 2. ROS 2 Handoff Topics
-- Room 1 (Alpha - Yellow Floor, Vacuum Cleaning):
-  - Subscribe to /room1/ready (std_msgs/msg/Bool, TRANSIENT_LOCAL QoS)
-  - Publish True to /room1/done (std_msgs/msg/Bool) when finished
-  - Controls: /vacuum/active (Bool), /cmd_vel (Twist), navigate_to_pose, /world/empty/create & /world/empty/remove
-- Room 2 (Beta - Mint/Green Floor, Pick & Place):
-  - Subscribe to /room2/ready (std_msgs/msg/Bool, TRANSIENT_LOCAL QoS)
-  - Publish True to /room2/done (std_msgs/msg/Bool) when finished
-  - Controls: /rgbd_camera/image, /rgbd_camera/depth_image, /arm_controller/joint_trajectory (joint1..joint4), /gripper_controller/gripper_cmd (0.018 open / -0.005 close)
+### 2. Home World Coordinates
+Origin `(0, 0)` = bottom-left outer corner, `x` east, `y` north (metres).
 
-### 3. Running Together
-- Terminal 1: ros2 launch home_nav_sim explore.launch.py humans:=false return_home:=false
-- Terminal 2: ros2 run robot_bringup doorway_navigator --ros-args -p wait_for_teammates:=true
-- Terminals 3 & 4: ros2 run robot_bringup <your_room_node>
+| Item | World Position |
+|---|---|
+| Door 1 (Alpha) | `x` 4.0–5.2, `y` 7.0 |
+| Door 2 (Beta) | `x` 14.8–16.0, `y` 7.0 |
+| Robot spawn | `(19.21, 0.79)`, yaw `1.5708` |
+| Alpha clean zone | centre `(6.79, 9.14)`, `2.29 × 1.57 m` |
+| Beta pick item | `(12.86, 8.21)`, `0.15 m` cube, `0.2 kg` |
+| Beta drop spot | `(18.98, 9.30)` |
+
+### 3. ROS 2 Mission Handoff Flags & Topics
+- **Exploration / SLAM Mapping (`frontier_explorer`):**
+  - Subscribes to `/exploration_pause` (`std_msgs/msg/Bool`) to pause/resume exploration
+  - Publishes `True` to `/exploration_done` (`std_msgs/msg/Bool`, `TRANSIENT_LOCAL` QoS) when mapping is complete
+  - Save the live map with `ros2 run robot_bringup save_map src/robot_bringup/maps/explored_map`
+- **Room 1 (Alpha — Yellow Floor, Vacuum Cleaning):**
+  - Subscribe to `/room1/ready` (`std_msgs/msg/Bool`, `TRANSIENT_LOCAL` QoS)
+  - Publish `True` to `/room1/done` (`std_msgs/msg/Bool`, `TRANSIENT_LOCAL` QoS) when finished
+  - Controls: `/vacuum/active` (`Bool`), `/cmd_vel` (`Twist`), `navigate_to_pose`, `/world/empty/create` & `/world/empty/remove`
+- **Room 2 (Beta — Mint/Green Floor, Pick & Place):**
+  - Subscribe to `/room2/ready` (`std_msgs/msg/Bool`, `TRANSIENT_LOCAL` QoS)
+  - Publish `True` to `/room2/done` (`std_msgs/msg/Bool`, `TRANSIENT_LOCAL` QoS) when finished
+  - Controls: `/rgbd_camera/image`, `/rgbd_camera/depth_image`, `/arm_controller/joint_trajectory` (`joint1`..`joint4`), `/gripper_controller/gripper_cmd` (`0.018` open / `-0.005` close), `/beta_pick_item/attach` & `/beta_pick_item/detach`
+
+### 4. Running Together
+- **Standalone Home World:** `ros2 launch robot_bringup world.launch.py` (or `humans:=false`)
+- **Manual SLAM Mapping:** `ros2 launch robot_bringup slam.launch.py`
+- **Saved-Map Nav2 Navigation:** `ros2 launch robot_bringup nav.launch.py` (add `humans:=true` for walking humans)
+- **Full Autonomous Exploration + Room Task Handoff:**
+  - Terminal 1: `ros2 launch robot_bringup explore.launch.py humans:=false return_home:=false`
+  - Terminal 2: `ros2 run robot_bringup doorway_navigator --ros-args -p wait_for_teammates:=true`
+  - Terminal 3: `ros2 run robot_bringup alpha_cleaning --ros-args -p wait_for_ready:=true`
+  - Terminal 4: `ros2 run robot_bringup beta_pick_place --ros-args -p wait_for_ready:=true`
