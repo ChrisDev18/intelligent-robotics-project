@@ -34,6 +34,9 @@ def generate_launch_description():
             'laser_max_range': '10.0',       # the robot's lidar range
             'robot_radius': '0.22',          # TurtleBot3 Waffle Pi with the arm folded
             'inflation_radius': '0.45',      # keeps the 1.2 m doors passable
+            'raytrace_min_range': '0.22',    # ignore LiDAR self-hits from arm/chassis
+            'obstacle_min_range': '0.22',    # prevents phantom obstacle under robot
+            'set_initial_pose': 'True',      # localize at map origin (0,0,0) immediately
         },
         convert_types=True,
     )
@@ -81,6 +84,6 @@ def generate_launch_description():
         DeclareLaunchArgument('rviz', default_value='true'),
         robot,
         # Wait for the robot, /clock, /scan and /odom before starting Nav2.
-        TimerAction(period=15.0, actions=[nav, rviz]),
-        TimerAction(period=20.0, actions=[initial_pose]),
+        TimerAction(period=5.0, actions=[nav, rviz]),
+        TimerAction(period=5.0, actions=[initial_pose]),
     ])

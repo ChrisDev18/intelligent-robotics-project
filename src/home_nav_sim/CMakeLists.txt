@@ -10,6 +10,7 @@ install(DIRECTORY launch worlds config rviz maps
 install(PROGRAMS
   scripts/frontier_explorer.py
   scripts/beta_pick_place.py
+  scripts/alpha_cleaning.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
