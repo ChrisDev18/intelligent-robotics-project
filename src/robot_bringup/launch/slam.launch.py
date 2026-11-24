@@ -1,6 +1,6 @@
 """Phase 3: build a map of the home world with slam_toolbox.
 
-    ros2 launch home_nav_sim slam.launch.py
+    ros2 launch robot_bringup slam.launch.py
 
 Starts the robot in the home world WITHOUT the walking humans (moving people
 would be baked into the map as obstacles), slam_toolbox and RViz.
@@ -8,7 +8,7 @@ would be baked into the map as obstacles), slam_toolbox and RViz.
 Drive with teleop in another terminal, then save the map:
 
     ros2 run teleop_twist_keyboard teleop_twist_keyboard
-    ros2 run nav2_map_server map_saver_cli -f ~/ros2_ws/src/intelligent-robotics-project/src/home_nav_sim/maps/home_map
+    ros2 run robot_bringup save_map src/robot_bringup/maps/home_map
 """
 import os
 
@@ -22,7 +22,7 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    pkg = get_package_share_directory('home_nav_sim')
+    pkg = get_package_share_directory('robot_bringup')
     slam_params = os.path.join(pkg, 'config', 'slam_toolbox.yaml')
     rviz_config = os.path.join(pkg, 'rviz', 'slam.rviz')
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Generate the home_nav_sim Gazebo Harmonic worlds.
+"""Generate the robot_bringup Gazebo Harmonic worlds.
 
 Edit the lists below (all units in metres, origin = bottom-left outer corner
 of the map, x to the east, y to the north) and run:
 
-    python3 tools/generate_world.py
+    python3 src/robot_bringup/tools/generate_world.py
 
 It writes:
     worlds/home.sdf             - everything, including the 3 walking humans
@@ -195,7 +195,7 @@ def build(with_humans):
     for c in CYLINDERS:
         parts.append(static_cylinder(*c))
     cx, cy, sx, sy = CLEAN_ZONE
-    parts.append(static_box("alpha_clean_zone", cx, cy, sx, sy, 0.002, (0.11, 0.62, 0.46),
+    parts.append(static_box("alpha_clean_zone", cx, cy, sx, sy, 0.002, (0.60, 0.60, 0.60),
                             collide=False, z=0.003, alpha=0.6))
     parts.append(pick_item())
     dx, dy, ds = DROP_SPOT

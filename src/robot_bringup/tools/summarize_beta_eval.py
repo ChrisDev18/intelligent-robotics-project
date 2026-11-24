@@ -2,10 +2,10 @@
 """Summarize Beta Pick & Place evaluation CSV logs into separate pick/place metrics.
 
 Examples:
-    python3 src/home_nav_sim/tools/summarize_beta_eval.py
-    python3 src/home_nav_sim/tools/summarize_beta_eval.py log/beta_pick_place_eval.csv --by-scenario
-    python3 src/home_nav_sim/tools/summarize_beta_eval.py log/beta_pick_place_eval.csv --scenario humans_true
-    python3 src/home_nav_sim/tools/summarize_beta_eval.py log/beta_pick_place_eval.csv --pick-thresh 0.10 --place-thresh 0.20
+    python3 src/robot_bringup/tools/summarize_beta_eval.py
+    python3 src/robot_bringup/tools/summarize_beta_eval.py log/beta_pick_place_eval.csv --by-scenario
+    python3 src/robot_bringup/tools/summarize_beta_eval.py log/beta_pick_place_eval.csv --scenario humans_true
+    python3 src/robot_bringup/tools/summarize_beta_eval.py log/beta_pick_place_eval.csv --pick-thresh 0.10 --place-thresh 0.20
 """
 import argparse
 from collections import Counter, defaultdict

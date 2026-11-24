@@ -171,11 +171,14 @@ def generate_launch_description():
         output='screen',
     )
 
-    # Detach beta_pick_item immediately after robot spawn so DetachableJoint starts detached
+    # Detach beta_pick_item after Gazebo physics has stepped and DetachableJoint has
+    # auto-attached (guaranteed once joint_state_broadcaster activates). Uses the
+    # bridged ROS 2 topic with -w 1 so ros_gz_bridge is matched before publishing,
+    # then exits cleanly so beta_pick_place can re-attach when its task runs.
     initial_detach_beta_item = ExecuteProcess(
         cmd=[
-            'gz', 'topic', '-t', '/beta_pick_item/detach',
-            '-m', 'gz.msgs.Empty', '-p', 'unused: true',
+            'ros2', 'topic', 'pub', '-w', '1', '--times', '10', '-r', '1',
+            '/beta_pick_item/detach', 'std_msgs/msg/Empty', '{}',
         ],
         output='screen',
     )
@@ -183,14 +186,14 @@ def generate_launch_description():
     spawn_jsb_after_create = RegisterEventHandler(
         event_handler=OnProcessExit(
             target_action=spawn_robot,
-            on_exit=[initial_detach_beta_item, joint_state_broadcaster_spawner],
+            on_exit=[joint_state_broadcaster_spawner],
         )
     )
 
     spawn_controllers_after_jsb = RegisterEventHandler(
         event_handler=OnProcessExit(
             target_action=joint_state_broadcaster_spawner,
-            on_exit=[arm_controller_spawner, gripper_controller_spawner],
+            on_exit=[initial_detach_beta_item, arm_controller_spawner, gripper_controller_spawner],
         )
     )
 

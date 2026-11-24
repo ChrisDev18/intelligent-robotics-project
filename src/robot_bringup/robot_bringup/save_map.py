@@ -4,7 +4,7 @@
 Used instead of nav2_map_server's map_saver_cli, which times out after
 2 seconds when Gazebo runs slowly in WSL.
 
-    python3 save_map.py ~/ros2_ws/src/intelligent-robotics-project/src/home_nav_sim/maps/home_map
+    ros2 run robot_bringup save_map src/robot_bringup/maps/home_map
 """
 import math
 import sys
@@ -58,18 +58,20 @@ def save(msg, out):
           f'{known} cells mapped) and {out.with_suffix(".yaml")}')
 
 
-def main():
-    if len(sys.argv) != 2:
-        sys.exit(__doc__)
-    out = Path(sys.argv[1]).expanduser()
-    if out.suffix in ('.pgm', '.yaml'):
-        out = out.with_suffix('')
-
+def main(args=None):
     import rclpy
     from nav_msgs.msg import OccupancyGrid
     from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+    from rclpy.utilities import remove_ros_args
 
-    rclpy.init()
+    cli_args = remove_ros_args(sys.argv if args is None else args)
+    if len(cli_args) != 2:
+        sys.exit(__doc__)
+    out = Path(cli_args[1]).expanduser()
+    if out.suffix in ('.pgm', '.yaml'):
+        out = out.with_suffix('')
+
+    rclpy.init(args=args)
     node = rclpy.create_node('home_map_saver')
     qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                      durability=DurabilityPolicy.TRANSIENT_LOCAL)

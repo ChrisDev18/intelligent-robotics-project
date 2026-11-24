@@ -8,13 +8,12 @@ This document explains how to run, configure, and integrate the **Room 2 (Beta) 
 
 | File | Purpose |
 | :--- | :--- |
-| `src/home_nav_sim/scripts/beta_pick_place.py` | Main ROS 2 node implementing the Room 2 (Beta) pick-and-place mission (`ros2 run home_nav_sim beta_pick_place.py`). |
-| `src/robot_bringup/robot_bringup/beta_pick_place.py` | Console-script entry-point wrapper (`ros2 run robot_bringup beta_pick_place`). |
+| `src/robot_bringup/robot_bringup/beta_pick_place.py` | Main ROS 2 node implementing the Room 2 (Beta) pick-and-place mission (`ros2 run robot_bringup beta_pick_place`). |
 | `src/robot_bringup/urdf/turtlebot3_manipulation_gz.xacro` | Added `gz-sim-detachable-joint-system` (`DetachableJoint`) plugin connecting `${prefix}link5` (gripper palm) to `beta_pick_item::link`. |
 | `src/robot_bringup/config/bridge_params.yaml` | Bridged `/beta_pick_item/attach`, `/beta_pick_item/detach`, and read-only ground truth `/eval/gz_dynamic_poses` (`/world/empty/dynamic_pose/info`). |
-| `src/home_nav_sim/tools/summarize_beta_eval.py` | Standalone CLI to aggregate pickup/placement distance error CSV logs into separate pick and place success rates. |
+| `src/robot_bringup/tools/summarize_beta_eval.py` | Standalone CLI to aggregate pickup/placement distance error CSV logs into separate pick and place success rates. |
 | `src/robot_bringup/launch/simulation.launch.py` | Publishes an initial `/beta_pick_item/detach` message immediately after `spawn_robot` exits so the cube starts detached during SLAM/exploration. |
-| `src/home_nav_sim/CMakeLists.txt` & `src/robot_bringup/setup.py` | Registered `beta_pick_place` executables in both packages. |
+| `src/robot_bringup/setup.py` | Registered the `beta_pick_place` console script entry point. |
 
 ---
 
@@ -23,7 +22,7 @@ This document explains how to run, configure, and integrate the **Room 2 (Beta) 
 ### Build
 ```bash
 source /opt/ros/jazzy/setup.bash
-colcon build --symlink-install --packages-select home_nav_sim robot_bringup
+colcon build --symlink-install --packages-select robot_bringup
 source install/setup.bash
 ```
 
@@ -31,34 +30,33 @@ source install/setup.bash
 1. **Terminal 1 — Launch Gazebo + Nav2 + RViz on the saved map:**
    ```bash
    source /opt/ros/jazzy/setup.bash && source install/setup.bash
-   ros2 launch home_nav_sim nav.launch.py
+   ros2 launch robot_bringup nav.launch.py
    ```
    *(Wait ~20–25 seconds until AMCL publishes the initial pose and Nav2 logs `Managed nodes are active`.)*
 
 2. **Terminal 2 — Run `beta_pick_place`:**
    ```bash
    source /opt/ros/jazzy/setup.bash && source install/setup.bash
-   ros2 run home_nav_sim beta_pick_place.py
+   ros2 run robot_bringup beta_pick_place
    ```
-   *(Or equivalently: `ros2 run robot_bringup beta_pick_place`)*
 
 ### Mode 2: Run in the Stripped-Down Practice World (`home_tasks.sdf`, no Nav2)
 1. **Terminal 1 — Launch the practice world:**
    ```bash
    source /opt/ros/jazzy/setup.bash && source install/setup.bash
-   ros2 launch home_nav_sim robot_in_home.launch.py world:=home_tasks.sdf
+   ros2 launch robot_bringup robot_in_home.launch.py world:=home_tasks.sdf
    ```
 2. **Terminal 2 — Run `beta_pick_place`:**
    ```bash
    source /opt/ros/jazzy/setup.bash && source install/setup.bash
-   ros2 run home_nav_sim beta_pick_place.py
+   ros2 run robot_bringup beta_pick_place
    ```
 
 ### Mode 3: Integration with `mission_manager.py` (Phase E) or `doorway_navigator.py`
 `beta_pick_place.py` supports two integration patterns out of the box:
 
 1. **Subprocess Run-and-Exit (Default — `wait_for_ready:=false`):**
-   * `mission_manager.py` can invoke `ros2 run home_nav_sim beta_pick_place.py` (or `ros2 run robot_bringup beta_pick_place`).
+   * `mission_manager.py` can invoke `ros2 run robot_bringup beta_pick_place`.
    * The node executes the full pick-and-place sequence immediately, publishes `Bool(data=True)` on `/room2/done` (`TRANSIENT_LOCAL` QoS), and exits with **return code `0` on success** or **`1` on failure** (making 1-retry logic in `mission_manager.py` straightforward).
 2. **Topic Handoff Mode (`wait_for_ready:=true`):**
    * When launched upfront with:
@@ -133,15 +131,15 @@ Every run of `beta_pick_place.py` logs **separate pickup and placement distance 
 ### 4.2 Running Tagged Trials & Summarising Results
 Run trials with an optional `scenario` tag (rows append automatically to `log/beta_pick_place_eval.csv`):
 ```bash
-ros2 run home_nav_sim beta_pick_place.py --ros-args -p scenario:=nav_no_humans
-ros2 run home_nav_sim beta_pick_place.py --ros-args -p scenario:=nav_humans
+ros2 run robot_bringup beta_pick_place --ros-args -p scenario:=nav_no_humans
+ros2 run robot_bringup beta_pick_place --ros-args -p scenario:=nav_humans
 ```
 
 At the end of every run, the node prints the current trial's errors plus the cumulative **Pick Success Rate**, **Place Success Rate**, **Place | Pick Rate**, and **Overall Mission Success Rate**.
 
 To inspect or re-analyse any CSV log offline (including grouping by scenario or testing stricter thresholds):
 ```bash
-python3 src/home_nav_sim/tools/summarize_beta_eval.py log/beta_pick_place_eval.csv
-python3 src/home_nav_sim/tools/summarize_beta_eval.py log/beta_pick_place_eval.csv --by-scenario
-python3 src/home_nav_sim/tools/summarize_beta_eval.py log/beta_pick_place_eval.csv --pick-thresh 0.10 --place-thresh 0.20
+python3 src/robot_bringup/tools/summarize_beta_eval.py log/beta_pick_place_eval.csv
+python3 src/robot_bringup/tools/summarize_beta_eval.py log/beta_pick_place_eval.csv --by-scenario
+python3 src/robot_bringup/tools/summarize_beta_eval.py log/beta_pick_place_eval.csv --pick-thresh 0.10 --place-thresh 0.20
 ```

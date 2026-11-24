@@ -7,9 +7,9 @@ pick-and-place cube in Beta. Nothing to collide with while you work on your task
 
 | | |
 |---|---|
-| World file | `src/home_nav_sim/worlds/home_tasks.sdf` |
-| Made by | `src/home_nav_sim/tools/make_task_world.py` (from `home_no_humans.sdf`) |
-| Opened with | `ros2 launch home_nav_sim robot_in_home.launch.py world:=home_tasks.sdf` |
+| World file | `src/robot_bringup/worlds/home_tasks.sdf` |
+| Made by | `src/robot_bringup/tools/make_task_world.py` (from `home_no_humans.sdf`) |
+| Opened with | `ros2 launch robot_bringup robot_in_home.launch.py world:=home_tasks.sdf` |
 
 Everything below assumes **Ubuntu 24.04** (native or WSL2 on Windows). Run each
 block in order; wait for one to finish before starting the next.
@@ -91,7 +91,7 @@ Then, in **one** terminal:
 
 ```bash
 cd ~/ros2_ws && source install/setup.bash
-ros2 launch home_nav_sim robot_in_home.launch.py world:=home_tasks.sdf
+ros2 launch robot_bringup robot_in_home.launch.py world:=home_tasks.sdf
 ```
 
 The Gazebo server starts first; the Gazebo window opens about 12 seconds later.
@@ -155,5 +155,5 @@ hall = lavender floor (y 0–7).
 
 - **`Detected jump back in time` / Nav2 never ready** → two simulations are running. Ctrl+C everything, run the cleanup in step 5, check `/clock` has 1 publisher.
 - **Gazebo window black or very slow** → `glxinfo -B | grep renderer` shows `llvmpipe` = software rendering. Update the Windows GPU driver, `wsl --update`, `wsl --shutdown`.
-- **Added a new launch/world file but `file not found`** → `colcon build --symlink-install --packages-select home_nav_sim --cmake-force-configure`.
-- **Changed the full worlds with `tools/generate_world.py`** → re-run `python3 tools/make_task_world.py` afterwards so this world matches.
+- **Added a new launch/world file but `file not found`** → `colcon build --symlink-install --packages-select robot_bringup`.
+- **Changed the full worlds with `src/robot_bringup/tools/generate_world.py`** → re-run `python3 src/robot_bringup/tools/make_task_world.py` afterwards so this world matches.
