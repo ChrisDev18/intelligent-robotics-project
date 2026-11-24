@@ -29,13 +29,17 @@ def generate_launch_description():
     pkg = get_package_share_directory('robot_bringup')
     nav2 = get_package_share_directory('nav2_bringup')
 
-    # Same Nav2 changes as nav.launch.py.
+    # Same Nav2 changes as nav.launch.py, including min_range filters so the
+    # manipulator arm and lifted Beta cube never paint phantom costmap obstacles.
     nav_params = RewrittenYaml(
         source_file=os.path.join(nav2, 'params', 'nav2_params.yaml'),
         param_rewrites={
             'use_sim_time': 'True',
+            'laser_max_range': '10.0',
             'robot_radius': '0.21',      # a bit bigger: stay out of tight gaps
-            'inflation_radius': '0.38',
+            'inflation_radius': '0.34',  # keeps 1.0 m clear doorways smooth to pass through
+            'raytrace_min_range': '0.26',  # ignore LiDAR self-hits from arm/cube lift
+            'obstacle_min_range': '0.26',  # prevents phantom obstacle on robot
             # Gazebo runs well below real time in WSL; allow older transforms.
             'transform_tolerance': '1.0',
             'xy_goal_tolerance': '0.5',   # exploring: close enough is fine

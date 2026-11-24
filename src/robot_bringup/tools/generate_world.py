@@ -21,18 +21,18 @@ WALLS = [
     ("wall_north", 0.0, 12.0, 20.0, 12.0),
     ("wall_west", 0.0, 0.0, 0.0, 12.0),
     ("wall_east", 20.0, 0.0, 20.0, 12.0),
-    # wall between hall and rooms, with Door 1 (x 4.0-5.2) and Door 2 (x 14.8-16.0)
+    # wall between hall and rooms, with Door Alpha (x 4.0-5.2) and Door Beta (x 14.8-16.0)
     ("wall_mid_a", 0.0, 7.0, 4.0, 7.0),
     ("wall_mid_b", 5.2, 7.0, 14.8, 7.0),
     ("wall_mid_c", 16.0, 7.0, 20.0, 7.0),
-    # wall between Room 1 (Alpha) and Room 2 (Beta)
+    # wall between Room Alpha and Room Beta
     ("wall_divider", 10.0, 7.0, 10.0, 12.0),
 ]
 
 # Coloured floors (visual only): name, cx, cy, sx, sy, rgb
 FLOORS = [
-    ("floor_alpha_room1", 5.0, 9.5, 10.0, 5.0, (1.00, 0.91, 0.48)),   # yellow
-    ("floor_beta_room2", 15.0, 9.5, 10.0, 5.0, (0.72, 0.94, 0.85)),   # mint
+    ("floor_alpha", 5.0, 9.5, 10.0, 5.0, (1.00, 0.91, 0.48)),         # yellow (Room Alpha)
+    ("floor_beta", 15.0, 9.5, 10.0, 5.0, (0.72, 0.94, 0.85)),         # mint (Room Beta)
     ("floor_hall", 10.0, 3.5, 20.0, 7.0, (0.86, 0.85, 0.96)),         # lavender
 ]
 
@@ -44,12 +44,12 @@ BLACK = (0.15, 0.15, 0.15)
 
 # Box furniture: name, cx, cy, sx, sy, height, rgb, yaw
 BOXES = [
-    # Room 1 - Alpha (bedroom)
+    # Room Alpha (bedroom)
     ("bed", 1.36, 10.84, 2.00, 1.61, 0.50, WHITE, 0.0),
     ("nightstand", 2.82, 11.39, 0.50, 0.50, 0.55, WOOD, 0.0),
     ("wardrobe", 8.54, 11.39, 2.21, 0.64, 2.00, DARK_WOOD, 0.0),
     ("bedroom_desk", 8.96, 7.68, 1.36, 0.64, 0.75, WOOD, 0.0),
-    # Room 2 - Beta (office)
+    # Room Beta (office)
     ("office_desk_1", 11.54, 11.04, 1.64, 0.79, 0.75, WOOD, 0.0),
     ("office_desk_2", 17.25, 11.04, 1.64, 0.79, 0.75, WOOD, 0.0),
     ("bookshelf", 19.59, 9.57, 0.46, 3.71, 1.80, DARK_WOOD, 0.0),
@@ -195,12 +195,12 @@ def build(with_humans):
     for c in CYLINDERS:
         parts.append(static_cylinder(*c))
     cx, cy, sx, sy = CLEAN_ZONE
-    parts.append(static_box("alpha_clean_zone", cx, cy, sx, sy, 0.002, (0.60, 0.60, 0.60),
-                            collide=False, z=0.003, alpha=0.6))
+    parts.append(static_box("alpha_clean_zone", cx, cy, sx, sy, 0.002, (0.24, 0.50, 0.84),
+                            collide=False, z=0.003, alpha=1.0))
     parts.append(pick_item())
     dx, dy, ds = DROP_SPOT
-    parts.append(static_box("beta_drop_spot", dx, dy, ds, ds, 0.002, (0.73, 0.46, 0.09),
-                            collide=False, z=0.003, alpha=0.7))
+    parts.append(static_box("beta_drop_spot", dx, dy, ds, ds, 0.002, (0.84, 0.14, 0.42),
+                            collide=False, z=0.003, alpha=1.0))
     if with_humans:
         for h in HUMANS:
             parts.append(actor(*h))

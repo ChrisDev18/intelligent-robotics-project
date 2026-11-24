@@ -183,6 +183,7 @@ def main(args=None):
             elif not want_pause and self.paused:
                 self.paused = False
                 self.progress_xy = None
+                self.empty_since = None
                 self.get_logger().info('Exploration RESUMED by task_manager.')
 
         def waiting(self, reason):
@@ -230,6 +231,9 @@ def main(args=None):
             handle.get_result_async().add_done_callback(self.on_goal_result)
 
         def on_goal_result(self, future):
+            if self.paused:
+                self.clear_goal()
+                return
             status = future.result().status
             if status == 4:   # SUCCEEDED
                 self.get_logger().info(f'Reached frontier goal ({self.goal_xy[0]:.2f}, {self.goal_xy[1]:.2f})')
