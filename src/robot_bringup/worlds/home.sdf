@@ -380,7 +380,7 @@
         <loop>true</loop>
         <delay_start>0</delay_start>
         <auto_start>true</auto_start>
-        <trajectory id='0' type='walk' tension='0.6'><waypoint><time>0.0</time><pose>15.89 11.14 1.0 0 0 -1.5708</pose></waypoint><waypoint><time>4.0</time><pose>15.89 8.07 1.0 0 0 -1.5708</pose></waypoint><waypoint><time>5.0</time><pose>15.89 8.07 1.0 0 0 1.5708</pose></waypoint><waypoint><time>9.0</time><pose>15.89 11.14 1.0 0 0 1.5708</pose></waypoint><waypoint><time>10.0</time><pose>15.89 11.14 1.0 0 0 -1.5708</pose></waypoint></trajectory>
+        <trajectory id='0' type='walk' tension='0.6'><waypoint><time>0.0</time><pose>11.0 9.6 1.0 0 0 -1.5708</pose></waypoint><waypoint><time>4.0</time><pose>11.0 7.6 1.0 0 0 -1.5708</pose></waypoint><waypoint><time>5.0</time><pose>11.0 7.6 1.0 0 0 1.5708</pose></waypoint><waypoint><time>9.0</time><pose>11.0 9.6 1.0 0 0 1.5708</pose></waypoint><waypoint><time>10.0</time><pose>11.0 9.6 1.0 0 0 -1.5708</pose></waypoint></trajectory>
       </script>
     </actor>
     <actor name='human_hall'>

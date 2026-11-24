@@ -91,7 +91,7 @@ WALK_DAE = "https://fuel.gazebosim.org/1.0/Mingfei/models/actor/tip/files/meshes
 # Humans walking back and forth: name, (x_a, y_a), (x_b, y_b), seconds per leg
 HUMANS = [
     ("human_alpha", (3.50, 10.43), (6.86, 10.43), 4.0),
-    ("human_beta", (15.89, 11.14), (15.89, 8.07), 4.0),
+    ("human_beta", (11.00, 9.60), (11.00, 7.60), 4.0),   # west lane, clear of the robot
     ("human_hall", (7.21, 6.29), (7.21, 3.00), 4.0),
 ]
 

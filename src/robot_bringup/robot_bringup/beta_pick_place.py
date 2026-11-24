@@ -104,6 +104,40 @@ def compute_grasp_point(rx: float, ry: float, ryaw: float, standoff_m: float):
     )
 
 
+def orange_mask(rgb):
+    """Pixels of the orange cube, by hue and saturation so shaded faces still count.
+
+    Cube (0.94, 0.62, 0.15): hue ~36 deg, saturation ~0.84. Shading scales all three
+    channels, so hue and saturation stay put. Excludes wood furniture (sat ~0.6),
+    the yellow Alpha floor (hue ~50, sat ~0.5) and the mint Beta floor.
+    """
+    f = rgb.astype(np.float32)
+    r, g, b = f[:, :, 0], f[:, :, 1], f[:, :, 2]
+    mx = np.maximum(np.maximum(r, g), b)
+    mn = np.minimum(np.minimum(r, g), b)
+    span = np.maximum(mx - mn, 1e-6)
+    hue = 60.0 * (g - b) / span                      # valid where red is the largest
+    sat = (mx - mn) / np.maximum(mx, 1e-6)
+    return (r >= g) & (g >= b) & (hue >= 20.0) & (hue <= 48.0) & (sat >= 0.68) & (mx >= 55.0)
+
+
+def save_png(path, rgb):
+    """Write an RGB uint8 image as PNG without OpenCV (for debugging what the camera saw)."""
+    import struct
+    import zlib
+    h, w, _ = rgb.shape
+    raw = b''.join(b'\x00' + rgb[i].astype(np.uint8).tobytes() for i in range(h))
+
+    def chunk(kind, data):
+        c = struct.pack('>I', len(data)) + kind + data
+        return c + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+
+    png = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
+           + chunk(b'IDAT', zlib.compress(raw, 6)) + chunk(b'IEND', b''))
+    with open(path, 'wb') as fh:
+        fh.write(png)
+
+
 def _fmt_float(val, digits: int = 4) -> str:
     if val is None:
         return ''
@@ -239,6 +273,11 @@ class BetaPickAndPlace(Node):
         self.declare_parameter('drop_x', -0.23)
         self.declare_parameter('drop_y', 8.51)
         self.declare_parameter('use_visual_servo', True)
+        # Find the cube with the RGB-D camera instead of trusting box_x/box_y.
+        # box_x/box_y stay as the fallback and to measure detection error.
+        self.declare_parameter('use_camera_detection', True)
+        self.declare_parameter('camera_hfov', 1.047)
+        self.declare_parameter('detection_log_path', 'log/beta_cube_detection.csv')
 
         # Evaluation & Logging Parameters (read-only ground truth; never used for control)
         self.declare_parameter('spawn_x', 19.21)
@@ -282,6 +321,9 @@ class BetaPickAndPlace(Node):
         self.odom_pose = None
         self.latest_rgb = None
         self.latest_depth = None
+        self.rgb_frame_id = ''
+        self.rgb_seq = 0
+        self.depth_seq = 0
         self.arm_joint_positions = {}
 
         # Gazebo ground-truth poses (evaluation only, populated via /eval/gz_dynamic_poses)
@@ -314,12 +356,15 @@ class BetaPickAndPlace(Node):
         if msg.encoding in ('rgb8', 'bgr8'):
             arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
             self.latest_rgb = arr if msg.encoding == 'rgb8' else arr[:, :, ::-1]
+            self.rgb_frame_id = msg.header.frame_id
+            self.rgb_seq += 1
 
     def _depth_cb(self, msg: Image):
         if msg.encoding == '32FC1':
             self.latest_depth = np.frombuffer(msg.data, dtype=np.float32).reshape(
                 msg.height, msg.width
             )
+            self.depth_seq += 1
 
     def _joint_state_cb(self, msg: JointState):
         for name, pos in zip(msg.name, msg.position):
@@ -659,10 +704,8 @@ class BetaPickAndPlace(Node):
             if self.latest_rgb is None:
                 continue
 
-            rgb = self.latest_rgb.astype(np.float32)
-            r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
-            # Orange cube RGB ~ (240, 158, 38)
-            cube_mask = (r > 165) & (g > 80) & (g < 195) & (b < 95) & ((r - b) > 90)
+            rgb = self.latest_rgb
+            cube_mask = orange_mask(rgb)
             ys, xs = np.nonzero(cube_mask)
             if len(xs) < 25:
                 break
@@ -681,6 +724,181 @@ class BetaPickAndPlace(Node):
             self.cmd_pub.publish(twist)
 
         self.stop_base()
+
+    # --- Camera-based cube detection ----------------------------------------
+    CUBE_SIZE_M = 0.15
+    CUBE_MIN_PIXELS = 12
+
+    def _camera_pose_map(self):
+        """Camera optical frame in the map: (position (3,), rotation 3x3).
+
+        Optical frame: x right, y down, z forward. Uses TF when it has the camera
+        frame, else the robot pose plus the camera's mount offset from the URDF.
+        """
+        frame = self.rgb_frame_id or 'rgbd_camera_optical_frame'
+        try:
+            t = self.tf_buffer.lookup_transform('map', frame, Time(),
+                                                timeout=Duration(seconds=0.2))
+            tr, q = t.transform.translation, t.transform.rotation
+            x, y, z, w = q.x, q.y, q.z, q.w
+            rot = np.array([
+                [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+            ])
+            return np.array([tr.x, tr.y, tr.z]), rot
+        except Exception:
+            pose = self.get_pose()
+            if pose is None:
+                return None
+            rx, ry, yaw = pose
+            c, sn = math.cos(yaw), math.sin(yaw)
+            pos = np.array([rx + 0.073 * c, ry + 0.073 * sn, 0.094])
+            rot = np.array([[sn, 0.0, c], [-c, 0.0, sn], [0.0, -1.0, 0.0]])
+            return pos, rot
+
+    def _detect_cube_once(self):
+        """Cube centre (map x, y, pixels) from the current RGB + depth frame, or None."""
+        rgb, depth = self.latest_rgb, self.latest_depth
+        if rgb is None or depth is None or rgb.shape[:2] != depth.shape:
+            return None
+        colour = orange_mask(rgb)
+        self.max_orange_px = max(getattr(self, 'max_orange_px', 0), int(colour.sum()))
+        mask = colour & np.isfinite(depth) & (depth > 0.1) & (depth < 4.5)
+        vs, us = np.nonzero(mask)
+        if len(us) < self.CUBE_MIN_PIXELS:
+            return None
+        cam = self._camera_pose_map()
+        if cam is None:
+            return None
+        pos, rot = cam
+        h, w = depth.shape
+        fx = (w / 2.0) / math.tan(float(self.get_parameter('camera_hfov').value) / 2.0)
+        d = depth[vs, us].astype(np.float64)
+        pts_cam = np.vstack(((us - (w - 1) / 2.0) * d / fx,
+                             (vs - (h - 1) / 2.0) * d / fx,
+                             d))
+        pts = rot @ pts_cam + pos.reshape(3, 1)
+        # Keep points that stand above the floor: the flat orange drop spot is ignored
+        keep = (pts[2] > 0.03) & (pts[2] < 0.30)
+        if int(keep.sum()) < self.CUBE_MIN_PIXELS:
+            return None
+        px = float(np.median(pts[0, keep]))
+        py = float(np.median(pts[1, keep]))
+        # We see the near face: the centre is half a cube further along the view ray
+        dx, dy = px - pos[0], py - pos[1]
+        n = math.hypot(dx, dy)
+        if n < 1e-6:
+            return None
+        half = self.CUBE_SIZE_M / 2.0
+        return px + half * dx / n, py + half * dy / n, int(keep.sum())
+
+    def _collect_detections(self, frames: int = 4, max_sec: float = 12.0):
+        """Detections from the next `frames` new camera frames (robot still)."""
+        hits = []
+        seen = 0
+        last = (self.rgb_seq, self.depth_seq)
+        end = time.time() + max_sec
+        while rclpy.ok() and time.time() < end and seen < frames:
+            rclpy.spin_once(self, timeout_sec=0.05)
+            now = (self.rgb_seq, self.depth_seq)
+            if now[0] != last[0] and now[1] != last[1]:
+                last = now
+                seen += 1
+                self.frames_seen = getattr(self, 'frames_seen', 0) + 1
+                hit = self._detect_cube_once()
+                if hit is not None:
+                    hits.append(hit)
+        return hits
+
+    def _rotate_in_place(self, angle_rad: float, speed: float = 0.35, timeout_sec: float = 20.0):
+        pose = self.get_pose()
+        if pose is None:
+            return
+        start_yaw, turned, prev = pose[2], 0.0, pose[2]
+        twist = Twist()
+        twist.angular.z = speed if angle_rad > 0 else -speed
+        t0 = time.time()
+        while rclpy.ok() and abs(turned) < abs(angle_rad) and time.time() - t0 < timeout_sec:
+            self.cmd_pub.publish(twist)
+            rclpy.spin_once(self, timeout_sec=0.05)
+            pose = self.get_pose()
+            if pose is not None:
+                turned += normalize_angle(pose[2] - prev)
+                prev = pose[2]
+        self.stop_base()
+
+    def locate_cube_with_camera(self, timeout_sec: float = 120.0):
+        """Look for the orange cube, turning in 40 degree steps; return (x, y) or None."""
+        if not self.get_parameter('use_camera_detection').value:
+            return None
+        self.get_logger().info('[Vision] Looking for the orange cube with the RGB-D camera...')
+        t0 = time.time()
+        step = math.radians(40.0)
+        turned = 0.0
+        while rclpy.ok() and time.time() - t0 < timeout_sec:
+            self.stop_base()
+            self.spin_for(0.6)  # let the image settle after moving
+            hits = self._collect_detections(frames=4)
+            if len(hits) >= 2:
+                xs = [h[0] for h in hits]
+                ys = [h[1] for h in hits]
+                cx, cy = float(np.median(xs)), float(np.median(ys))
+                self.last_detection = {
+                    'frames': len(hits), 'pixels': int(np.median([h[2] for h in hits])),
+                    'turned_deg': math.degrees(turned), 'time_s': time.time() - t0,
+                }
+                self.get_logger().info(
+                    f'[Vision] Cube found at map ({cx:.2f}, {cy:.2f}) from {len(hits)} frames '
+                    f'after turning {math.degrees(turned):.0f} deg.'
+                )
+                return cx, cy
+            if turned >= 2.0 * math.pi - 1e-3:
+                break
+            self.get_logger().info('[Vision] Cube not in view; turning 40 deg to search...')
+            self._rotate_in_place(step)
+            turned += step
+        self.get_logger().warn(
+            f"[Vision] Cube not found by camera. Frames received: {getattr(self, 'frames_seen', 0)}, "
+            f"most orange pixels in one frame: {getattr(self, 'max_orange_px', 0)}."
+        )
+        self._save_camera_view('cube_not_found')
+        return None
+
+    def _save_camera_view(self, tag):
+        if self.latest_rgb is None:
+            self.get_logger().warn('[Vision] No camera image was ever received on /rgbd_camera/image.')
+            return
+        path = os.path.join(os.path.dirname(str(self.get_parameter('detection_log_path').value)) or '.',
+                            f'beta_camera_{tag}.png')
+        try:
+            save_png(path, self.latest_rgb)
+            self.get_logger().info(f'[Vision] Saved what the camera saw to {path}')
+        except OSError as exc:
+            self.get_logger().warn(f'[Vision] Could not save {path}: {exc}')
+
+    def _log_detection(self, ref_x, ref_y, det_x, det_y, used_camera):
+        path = str(self.get_parameter('detection_log_path').value)
+        info = getattr(self, 'last_detection', None) or {}
+        err = math.hypot(det_x - ref_x, det_y - ref_y) if used_camera else None
+        try:
+            os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+            new = not os.path.exists(path)
+            with open(path, 'a', newline='') as fh:
+                wr = csv.writer(fh)
+                if new:
+                    wr.writerow(['timestamp_utc', 'used_camera', 'ref_x', 'ref_y', 'det_x',
+                                 'det_y', 'error_m', 'frames', 'pixels', 'turned_deg', 'time_s'])
+                wr.writerow([
+                    datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'), used_camera,
+                    f'{ref_x:.3f}', f'{ref_y:.3f}',
+                    f'{det_x:.3f}' if used_camera else '', f'{det_y:.3f}' if used_camera else '',
+                    f'{err:.3f}' if err is not None else '', info.get('frames', ''),
+                    info.get('pixels', ''), f"{info.get('turned_deg', 0):.0f}" if used_camera else '',
+                    f"{info.get('time_s', 0):.1f}" if used_camera else '',
+                ])
+        except OSError as exc:
+            self.get_logger().warn(f'[Vision] Could not write {path}: {exc}')
 
     def backup_distance(self, distance_m: float = 0.25, speed: float = 0.14):
         pose0 = self.get_pose()
@@ -729,6 +947,7 @@ class BetaPickAndPlace(Node):
         scenario = str(self.get_parameter('scenario').value)
 
         mission_t0 = time.time()
+        ref_box_x, ref_box_y = box_x, box_y  # configured position, to measure detection error
         pick_done_t = None
         failure_reasons = []
 
@@ -809,6 +1028,23 @@ class BetaPickAndPlace(Node):
                     fine_align=False, pos_tol=0.12,
                 )
 
+            # 2b. Find the cube with the camera (fallback: the configured position)
+            found = self.locate_cube_with_camera()
+            if found is not None:
+                box_x, box_y = found
+                self.get_logger().info(
+                    f'[Vision] Using camera position ({box_x:.2f}, {box_y:.2f}); '
+                    f'{100 * math.hypot(box_x - ref_box_x, box_y - ref_box_y):.1f} cm '
+                    f'from the configured position.'
+                )
+            else:
+                self.get_logger().warn(
+                    f'[Vision] Falling back to configured position ({box_x:.2f}, {box_y:.2f}).'
+                )
+            self._log_detection(ref_box_x, ref_box_y, box_x, box_y, found is not None)
+            eval_record['box_target_x'] = box_x
+            eval_record['box_target_y'] = box_y
+
             # 3. Approach the Beta Cube from the East (facing West, yaw = pi)
             # Stop at box_x + 0.60 first so Nav2 stays outside the static map's
             # inflation radius around the cube, then close in with closed-loop control.
@@ -823,6 +1059,36 @@ class BetaPickAndPlace(Node):
                 fine_align=True, pos_tol=0.05,
             ):
                 self.get_logger().warn('Pre-grasp pose had residual error; continuing to grasp pose.')
+
+            # Close-range check: the cube now fills ~90 px instead of ~17, so refine it
+            # (also runs if the far search failed: up close the cube is easy to see)
+            self.stop_base()
+            self.spin_for(0.6)
+            close = self._collect_detections(frames=4)
+            if len(close) >= 2:
+                nx = float(np.median([h[0] for h in close]))
+                ny = float(np.median([h[1] for h in close]))
+                shift = math.hypot(nx - box_x, ny - box_y)
+                if shift <= 0.40:
+                    self.get_logger().info(
+                        f'[Vision] Close-range check: cube at ({nx:.3f}, {ny:.3f}), '
+                        f'corrected by {100 * shift:.1f} cm.'
+                    )
+                    box_x, box_y = nx, ny
+                    grasp_x = box_x + self.GRASP_STANDOFF_M
+                    grasp_y = box_y
+                    eval_record['box_target_x'] = box_x
+                    eval_record['box_target_y'] = box_y
+                    self.last_detection = {'frames': len(close), 'pixels': int(np.median([h[2] for h in close])),
+                                           'turned_deg': 0.0, 'time_s': 0.0}
+                    self._log_detection(ref_box_x, ref_box_y, box_x, box_y, True)
+                else:
+                    self.get_logger().warn(
+                        f'[Vision] Close-range reading jumped {100 * shift:.0f} cm; ignoring it.'
+                    )
+            else:
+                self.get_logger().warn('[Vision] Close-range check did not see the cube.')
+                self._save_camera_view('close_range_miss')
 
             self.move_arm(
                 self.PRE_PICK_POSE, duration_sec=1.8, description='Preparing arm for pick'
