@@ -310,7 +310,10 @@ class AlphaCleaning(Node):
 
             self.navigator.goToPose(pose)
             while not self.navigator.isTaskComplete():
-                rclpy.spin_once(self, timeout_sec=0.05)
+                # Process every queued message, not just one: /odom (50 Hz) is first in
+                # line and otherwise starves /tf, leaving the dirt check with a stale pose.
+                for _ in range(50):
+                    rclpy.spin_once(self, timeout_sec=0.0)
                 time.sleep(0.05)
 
             from nav2_simple_commander.robot_navigator import TaskResult
@@ -352,8 +355,27 @@ class AlphaCleaning(Node):
         self.get_logger().info(f'[Vacuum] State -> {state_str}')
 
     # --- Gazebo Dirt Management ----------------------------------------------
+    def _hoover_pose(self):
+        """Robot pose in the map frame for the dirt check: the latest /odom pose (always
+        fresh) moved into the map frame by SLAM/AMCL's map->odom correction, which changes
+        slowly, so a slightly old value is fine. Falls back to get_pose()."""
+        if self.odom_pose is None:
+            return self.get_pose()
+        try:
+            t = self.tf_buffer.lookup_transform('map', 'odom', Time(),
+                                                timeout=Duration(seconds=0.0))
+        except Exception:
+            return self.get_pose()
+        q = t.transform.rotation
+        oyaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        ox, oy = t.transform.translation.x, t.transform.translation.y
+        x, y, yaw = self.odom_pose
+        return (ox + x * math.cos(oyaw) - y * math.sin(oyaw),
+                oy + x * math.sin(oyaw) + y * math.cos(oyaw),
+                yaw + oyaw)
+
     def _check_hoover_dirt(self):
-        pose = self.get_pose()
+        pose = self._hoover_pose()
         if pose is None or not self.active_dirt:
             return
 

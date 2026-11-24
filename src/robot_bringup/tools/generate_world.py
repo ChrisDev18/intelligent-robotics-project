@@ -195,7 +195,7 @@ def build(with_humans):
     for c in CYLINDERS:
         parts.append(static_cylinder(*c))
     cx, cy, sx, sy = CLEAN_ZONE
-    parts.append(static_box("alpha_clean_zone", cx, cy, sx, sy, 0.002, (0.11, 0.62, 0.46),
+    parts.append(static_box("alpha_clean_zone", cx, cy, sx, sy, 0.002, (0.60, 0.60, 0.60),
                             collide=False, z=0.003, alpha=0.6))
     parts.append(pick_item())
     dx, dy, ds = DROP_SPOT

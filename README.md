@@ -38,7 +38,6 @@ src/
     │   ├── doorway_navigator.py  # Room floor-color discovery + Nav2 doorway handoff controller
     │   ├── frontier_explorer.py  # Autonomous SLAM frontier exploration (/exploration_done, /exploration_pause)
     │   ├── save_map.py           # Live /map saver node (.pgm + .yaml)
-    │   ├── task_manager.py       # High-level autonomous mission executive
     │   ├── test_robot.py         # Full sensor, base, arm & gripper verification node
     │   └── vacuum_demo.py        # Standalone vacuum cleaner & dirt-hoovering demo
     │
@@ -121,7 +120,7 @@ flowchart TB
     subgraph Nodes["ROS 2 Control & Demo Nodes (robot_bringup)"]
         TestNode["test_robot.py\n(Full Sensor, Base, Arm & Gripper Verification)"]
         VacDemo["vacuum_demo.py\n(Spawns Dirt Particles & Hoovers Them Under vacuum_link)"]
-        TaskMgr["task_manager.py\n(High-Level Room 1 & Room 2 Mission Sequence)"]
+        Mission["mission_supervisor.py\n(Phase E: runs Room 1 & Room 2 tasks in order)"]
     end
 
     Robot <--> Gazebo
@@ -259,13 +258,7 @@ You should see Gazebo open with an empty world and your TurtleBot3 Waffle Pi wit
    ```
    *Drives the base forward/backward, rotates left/right, moves the 4-DOF OpenManipulator-X arm through a reach-and-lift sequence, opens/closes the gripper, and prints a `[OK]` checklist for all 6 sensors.*
 
-3. **High-Level Mission Sequence (Room 1 + Room 2 Skeleton):**
-   ```bash
-   ros2 run robot_bringup task_manager
-   ```
-   *Not yet properly implemented or tested*
-
-4. **Run SLAM visualisation**
+3. **Run SLAM visualisation**
    ```bash
    ros2 launch slam_toolbox online_async_launch.py use_sim_time:=true
    ```
@@ -321,7 +314,20 @@ Origin `(0, 0)` = bottom-left outer corner, `x` east, `y` north (metres).
   - Publish `True` to `/room2/done` (`std_msgs/msg/Bool`, `TRANSIENT_LOCAL` QoS) when finished
   - Controls: `/rgbd_camera/image`, `/rgbd_camera/depth_image`, `/arm_controller/joint_trajectory` (`joint1`..`joint4`), `/gripper_controller/gripper_cmd` (`0.018` open / `-0.005` close), `/beta_pick_item/attach` & `/beta_pick_item/detach`
 
-### 4. Running Together
+### 4. Full Mission in One Command (Phase E)
+```bash
+ros2 launch robot_bringup mission.launch.py                 # no humans
+ros2 launch robot_bringup mission.launch.py humans:=true    # with walking humans
+ros2 topic echo /mission_status                             # watch progress (second terminal)
+```
+Starts exploration (SLAM + Nav2 + frontier explorer), `doorway_navigator` and `mission_supervisor`:
+1. The robot explores the unknown house, then `doorway_navigator` drives to Alpha and publishes `/room1/ready`.
+2. `mission_supervisor` runs `alpha_cleaning`, retrying once if it fails. Then the same for Beta with `beta_pick_place`.
+3. If a task still fails, the supervisor publishes its `/roomN/done` itself so the mission carries on, and records the failure.
+4. `doorway_navigator` drives home. The supervisor publishes `done` (or `done_with_failures`) on `/mission_status`
+   and appends a row to `log/mission_results.csv`: exploration time, each task's result, attempts and time, and total time.
+
+### 5. Running Pieces Separately
 - **Standalone Home World:** `ros2 launch robot_bringup world.launch.py` (or `humans:=false`)
 - **Manual SLAM Mapping:** `ros2 launch robot_bringup slam.launch.py`
 - **Saved-Map Nav2 Navigation:** `ros2 launch robot_bringup nav.launch.py` (add `humans:=true` for walking humans)

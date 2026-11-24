@@ -32,7 +32,7 @@ SPAWN_X, SPAWN_Y = 19.21, 0.79
 
 
 def world_to_slam_map(wx: float, wy: float, wyaw: float):
-    return -(wx - SPAWN_X), -(wy - SPAWN_Y), wyaw + math.pi
+    return wx - SPAWN_X, wy - SPAWN_Y, wyaw
 
 
 def analyze_floor_color(rgb_img: np.ndarray):
