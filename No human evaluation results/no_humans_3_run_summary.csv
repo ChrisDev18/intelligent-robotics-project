@@ -1,0 +1,4 @@
+run,exploration_s,alpha_ok,alpha_attempts,alpha_s,alpha_dirt_cleaned,alpha_dirt_total,alpha_dirt_ratio,beta_ok,beta_attempts,beta_pick_success,beta_place_success,beta_placement_error_m,beta_s,total_s,mission_success,notes
+1,197.4,True,1,177.6,7,9,0.78,True,1,True,True,0.0133,179.1,700.0,True,
+2,302.3,True,1,160.6,7,9,0.78,True,1,True,True,0.0162,147.5,816.0,True,
+3,289.7,True,1,151.2,6,9,0.67,True,1,True,True,0.0140,131.5,746.0,True,"Detailed eval CSVs also contain an earlier interrupted partial trial; row shown is the final successful trial."

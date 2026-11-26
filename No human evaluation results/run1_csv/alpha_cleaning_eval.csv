@@ -1,0 +1,2 @@
+timestamp_utc,trial_id,nav_mode,clean_x_min,clean_x_max,clean_y_min,clean_y_max,dirt_total,dirt_cleaned,dirt_ratio,total_time_sec,mission_success,failure_reason
+2026-11-26T14:57:12Z,1,nav2,-13.6,-11.3,7.6,9.1,9,7,0.78,173.9,True,
