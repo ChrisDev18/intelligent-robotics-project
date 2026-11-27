@@ -1,22 +1,16 @@
 #!/usr/bin/env python3
-"""Phase D: Room 2 (Beta) Pick and Place Task Node.
+"""Phase D: Room Beta Pick and Place Task Node.
 
-Drives the TurtleBot3 Manipulation robot to the Beta cube at map (-6.35, 7.42),
-lowers the 4-DOF OpenManipulator-X arm, closes the gripper, attaches the cube
-via Gazebo's DetachableJoint system (/beta_pick_item/attach), carries the cube
-to the Beta drop spot at map (-0.23, 8.51), lowers and releases it
-(/beta_pick_item/detach), publishes True to /room2/done, and exits with 0.
-
-Supports both:
-  1. Standalone / Mission Manager subprocess execution (default):
-       ros2 run robot_bringup beta_pick_place
-     Runs immediately and exits with return code 0 (success) or 1 (failure).
-  2. Topic handoff mode (waits for /room2/ready before starting):
-       ros2 run robot_bringup beta_pick_place --ros-args -p wait_for_ready:=true
-
-Also supports both Nav2 navigation (when explore.launch.py or nav.launch.py is
-running) and direct odometry waypoint driving (when testing in the stripped-down
-practice world via robot_in_home.launch.py world:=home_tasks.sdf).
+Supports two targeting modes selectable via parameter `discover_targets`:
+1. Autonomous Discovery Mode (`discover_targets:=true`, used by mission.launch.py):
+   Visually locates both the orange 0.15 m cube (`beta_pick_item`) and the
+   crimson/magenta drop pad (`beta_drop_spot`) using the RGB-D camera, TF, and
+   live SLAM /map (seeded from /discovered/box_pose & /discovered/drop_pose plus
+   active 360° scan and free-space room viewpoint search). Chooses collision-free
+   approach angles dynamically on /map, refines the box pose at close range via
+   RGB-D, grasps, carries via Nav2, and places on the discovered drop pad.
+2. Standalone / Parameter Mode (`discover_targets:=false`, default):
+   Uses `box_x/y` and `drop_x/y` parameters directly for isolated/practice testing.
 """
 import csv
 from datetime import datetime, timezone
@@ -39,12 +33,25 @@ from builtin_interfaces.msg import Duration as MsgDuration
 from control_msgs.action import GripperCommand
 from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import NavigateToPose
-from nav_msgs.msg import Odometry
-from sensor_msgs.msg import Image, JointState
+from nav2_msgs.srv import ClearEntireCostmap
+from nav_msgs.msg import OccupancyGrid, Odometry
+from sensor_msgs.msg import CameraInfo, Image, JointState, LaserScan
 from std_msgs.msg import Bool, Empty, String
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer, TransformListener
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+
+from robot_bringup.perception import (
+    classify_floor_color,
+    detect_drop_spot_map,
+    detect_orange_cube_map,
+    estimate_cluster_centroid,
+    intrinsics_from_camera_info,
+    sample_room_search_viewpoints,
+    segment_orange_cube,
+    select_approach_pose,
+    transform_stamped_to_matrix,
+)
 
 
 EVAL_CSV_COLUMNS = [
@@ -234,6 +241,7 @@ class BetaPickAndPlace(Node):
 
         # Task & Navigation Parameters
         self.declare_parameter('wait_for_ready', False)
+        self.declare_parameter('discover_targets', False)
         self.declare_parameter('box_x', -6.35)
         self.declare_parameter('box_y', 7.42)
         self.declare_parameter('drop_x', -0.23)
@@ -263,46 +271,64 @@ class BetaPickAndPlace(Node):
         )
         self.attach_pub = self.create_publisher(Empty, '/beta_pick_item/attach', 10)
         self.detach_pub = self.create_publisher(Empty, '/beta_pick_item/detach', 10)
-        self.done_pub = self.create_publisher(Bool, '/room2/done', latched_qos)
+        self.done_pub = self.create_publisher(Bool, '/room_beta/done', latched_qos)
         self.eval_pub = self.create_publisher(
             String, '/beta_pick_place/eval_metrics', latched_qos
         )
 
-        # Action clients
+        # Action & Service clients
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.gripper_client = ActionClient(
             self, GripperCommand, '/gripper_controller/gripper_cmd'
+        )
+        self.clear_local_costmap = self.create_client(
+            ClearEntireCostmap, '/local_costmap/clear_entirely_local_costmap'
+        )
+        self.clear_global_costmap = self.create_client(
+            ClearEntireCostmap, '/global_costmap/clear_entirely_global_costmap'
         )
 
         # TF & Subscriptions
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        self.room2_ready = False
+        self.room_beta_ready = False
         self.odom_pose = None
         self.latest_rgb = None
         self.latest_depth = None
+        self.latest_scan = None
+        self.camera_info = None
+        self.map_msg = None
+        self.discovered_box_msg = None
+        self.discovered_drop_msg = None
+        self._rgb_seq = 0
         self.arm_joint_positions = {}
 
         # Gazebo ground-truth poses (evaluation only, populated via /eval/gz_dynamic_poses)
         self.gz_robot_pose = None  # (wx, wy, wz, yaw) in Gazebo world frame
         self.gz_cube_pose = None   # (wx, wy, wz, yaw) in Gazebo world frame
 
-        self.create_subscription(Bool, '/room2/ready', self._ready_cb, latched_qos)
+        self.create_subscription(Bool, '/room_beta/ready', self._ready_cb, latched_qos)
         self.create_subscription(Odometry, '/odom', self._odom_cb, 10)
+        self.create_subscription(LaserScan, '/scan', self._scan_cb, 10)
         self.create_subscription(Image, '/rgbd_camera/image', self._rgb_cb, 10)
         self.create_subscription(Image, '/rgbd_camera/depth_image', self._depth_cb, 10)
+        self.create_subscription(CameraInfo, '/rgbd_camera/camera_info', self._cam_info_cb, 10)
+        self.create_subscription(OccupancyGrid, '/map', self._map_cb, latched_qos)
+        self.create_subscription(String, '/discovered/box_pose', self._discovered_box_cb, latched_qos)
+        self.create_subscription(String, '/discovered/drop_pose', self._discovered_drop_cb, latched_qos)
         self.create_subscription(JointState, '/joint_states', self._joint_state_cb, 10)
         self.create_subscription(
             TFMessage, '/eval/gz_dynamic_poses', self._gz_poses_cb, 10
         )
 
-        self.get_logger().info('Beta Pick & Place node initialised.')
+        disc_str = 'autonomous-discovery' if self.get_parameter('discover_targets').value else 'parameter-coords'
+        self.get_logger().info(f'Beta Pick & Place node initialised in [{disc_str}] mode.')
 
     # --- Callbacks -----------------------------------------------------------
     def _ready_cb(self, msg: Bool):
         if msg.data:
-            self.room2_ready = True
+            self.room_beta_ready = True
 
     def _odom_cb(self, msg: Odometry):
         p = msg.pose.pose.position
@@ -310,16 +336,64 @@ class BetaPickAndPlace(Node):
         yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
         self.odom_pose = (p.x, p.y, yaw)
 
+    def _scan_cb(self, msg: LaserScan):
+        self.latest_scan = msg
+
+    def _min_scan_in_arc(self, center_angle_rad: float, half_arc_rad: float = 0.55) -> float:
+        """Return min valid LiDAR range (>= 0.25 m) within an angular cone, or inf."""
+        s = self.latest_scan
+        if s is None or not s.ranges:
+            return math.inf
+        arr = np.asarray(s.ranges, dtype=np.float64)
+        angles = s.angle_min + np.arange(len(arr)) * s.angle_increment
+        diffs = np.abs(np.arctan2(np.sin(angles - center_angle_rad), np.cos(angles - center_angle_rad)))
+        mask = (diffs <= half_arc_rad) & np.isfinite(arr) & (arr >= 0.25)
+        if not np.any(mask):
+            return math.inf
+        return float(np.min(arr[mask]))
+
+    def clear_costmaps(self):
+        """Clear Nav2 local and global costmaps (e.g. after lifting the cube)."""
+        for name, client in (
+            ('local', self.clear_local_costmap),
+            ('global', self.clear_global_costmap),
+        ):
+            if client.wait_for_service(timeout_sec=1.0):
+                fut = client.call_async(ClearEntireCostmap.Request())
+                t0 = time.time()
+                while rclpy.ok() and not fut.done() and (time.time() - t0) < 2.0:
+                    rclpy.spin_once(self, timeout_sec=0.05)
+                self.get_logger().info(f'[Nav2] Cleared {name} costmap.')
+
     def _rgb_cb(self, msg: Image):
         if msg.encoding in ('rgb8', 'bgr8'):
             arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
             self.latest_rgb = arr if msg.encoding == 'rgb8' else arr[:, :, ::-1]
+            self._rgb_seq += 1
 
     def _depth_cb(self, msg: Image):
         if msg.encoding == '32FC1':
             self.latest_depth = np.frombuffer(msg.data, dtype=np.float32).reshape(
                 msg.height, msg.width
             )
+
+    def _cam_info_cb(self, msg: CameraInfo):
+        self.camera_info = msg
+
+    def _map_cb(self, msg: OccupancyGrid):
+        self.map_msg = msg
+
+    def _discovered_box_cb(self, msg: String):
+        try:
+            self.discovered_box_msg = json.loads(msg.data)
+        except Exception:
+            pass
+
+    def _discovered_drop_cb(self, msg: String):
+        try:
+            self.discovered_drop_msg = json.loads(msg.data)
+        except Exception:
+            pass
 
     def _joint_state_cb(self, msg: JointState):
         for name, pos in zip(msg.name, msg.position):
@@ -330,7 +404,6 @@ class BetaPickAndPlace(Node):
         for tr in msg.transforms:
             child = tr.child_frame_id
             parent = tr.header.frame_id
-            # Only accept top-level world-frame model transforms (not nested link transforms)
             if parent not in ('empty', 'world', '') or child == parent:
                 continue
             t = tr.transform.translation
@@ -355,7 +428,6 @@ class BetaPickAndPlace(Node):
         return self.gz_robot_pose is not None or self.gz_cube_pose is not None
 
     def get_gz_robot_pose_map(self):
-        """Return ground-truth robot (map_x, map_y, world_z, yaw) or None."""
         if self.gz_robot_pose is None:
             return None
         wx, wy, wz, yaw = self.gz_robot_pose
@@ -363,7 +435,6 @@ class BetaPickAndPlace(Node):
         return mx, my, wz, yaw
 
     def get_gz_cube_pose_map(self):
-        """Return ground-truth cube (map_x, map_y, world_z, yaw) or None."""
         if self.gz_cube_pose is None:
             return None
         wx, wy, wz, yaw = self.gz_cube_pose
@@ -371,7 +442,6 @@ class BetaPickAndPlace(Node):
         return mx, my, wz, yaw
 
     def _record_and_report_eval(self, eval_record: dict):
-        """Append evaluation record to CSV, publish JSON topic, and log cumulative rates."""
         csv_path = str(self.get_parameter('eval_log_path').value)
         try:
             trial_id = append_eval_csv(csv_path, eval_record)
@@ -381,7 +451,6 @@ class BetaPickAndPlace(Node):
             trial_id = eval_record.get('trial_id', 0)
             summary = {'total': 0}
 
-        # Publish structured JSON metrics for external evaluation nodes
         try:
             if rclpy.ok():
                 payload = json.dumps(eval_record, default=str)
@@ -469,6 +538,255 @@ class BetaPickAndPlace(Node):
         except Exception:
             return self.odom_pose
 
+    def get_cam_transform(self):
+        try:
+            t = self.tf_buffer.lookup_transform(
+                'map', 'rgbd_camera_optical_frame', Time(), timeout=Duration(seconds=0.1)
+            )
+            return transform_stamped_to_matrix(t)
+        except Exception:
+            return None
+
+    def get_map_array(self):
+        if self.map_msg is None:
+            return None, 0.0, 0.0, 0.05
+        info = self.map_msg.info
+        grid = np.array(self.map_msg.data, dtype=np.int16).reshape(info.height, info.width)
+        return grid, info.origin.position.x, info.origin.position.y, info.resolution
+
+    # --- Autonomous Visual Discovery (Room Beta Box & Drop Spot) -------------
+    def nudge_clear_of_doorway(self, distance_m: float = 0.45, speed: float = 0.14):
+        """If starting straddled inside a narrow doorway, drive forward cleanly into the room."""
+        self.spin_for(0.3)
+        left_min = self._min_scan_in_arc(math.pi / 2.0, half_arc_rad=0.55)
+        right_min = self._min_scan_in_arc(-math.pi / 2.0, half_arc_rad=0.55)
+        front_min = self._min_scan_in_arc(0.0, half_arc_rad=0.45)
+
+        if not ((left_min < 0.78 and right_min < 0.78) or min(left_min, right_min) < 0.42):
+            return
+        if front_min < 0.70:
+            return
+
+        pose0 = self.get_pose()
+        if pose0 is None:
+            return
+        self.get_logger().info(
+            f'[Doorway Clear] Narrow sides (L={left_min:.2f} m, R={right_min:.2f} m, F={front_min:.2f} m); '
+            f'nudging {distance_m:.2f} m cleanly into Room Beta...'
+        )
+        x0, y0, _ = pose0
+        twist = Twist()
+        twist.linear.x = abs(speed)
+        start = time.time()
+        while rclpy.ok() and (time.time() - start) < 15.0:
+            rclpy.spin_once(self, timeout_sec=0.02)
+            if self._min_scan_in_arc(0.0, half_arc_rad=0.45) < 0.40:
+                break
+            pose = self.get_pose()
+            if pose is not None and math.hypot(pose[0] - x0, pose[1] - y0) >= distance_m:
+                break
+            self.cmd_pub.publish(twist)
+        self.stop_base()
+
+    def _sample_beta_targets_frame(self, box_obs: list, drop_obs: list):
+        if self.latest_rgb is None:
+            return
+        T_map_cam = self.get_cam_transform()
+        if T_map_cam is None:
+            return
+        intrinsics = intrinsics_from_camera_info(self.camera_info)
+
+        box = detect_orange_cube_map(
+            self.latest_rgb, self.latest_depth, intrinsics, T_map_cam
+        )
+        if box is not None:
+            box_obs.append((box[0], box[1]))
+
+        drop = detect_drop_spot_map(
+            self.latest_rgb, self.latest_depth, intrinsics, T_map_cam
+        )
+        if drop is not None:
+            drop_obs.append((drop[0], drop[1]))
+
+    def _rotate_and_scan_beta(self, box_obs: list, drop_obs: list,
+                              target_angle: float = 2.0 * math.pi,
+                              ang_vel: float = 0.60, timeout_sec: float = 40.0,
+                              stop_when_both_found: bool = True):
+        """Rotate in place scanning for both the orange cube and crimson drop pad."""
+        pose0 = self.get_pose()
+        if pose0 is None:
+            return
+        prev_yaw = pose0[2]
+        turned = 0.0
+        last_seq = -1
+        start = time.time()
+        twist = Twist()
+        twist.angular.z = ang_vel
+
+        while rclpy.ok() and turned < target_angle and (time.time() - start) < timeout_sec:
+            for _ in range(10):
+                rclpy.spin_once(self, timeout_sec=0.0)
+            time.sleep(0.03)
+            self.cmd_pub.publish(twist)
+
+            pose = self.get_pose()
+            if pose is not None:
+                turned += abs(normalize_angle(pose[2] - prev_yaw))
+                prev_yaw = pose[2]
+
+            if self._rgb_seq != last_seq:
+                last_seq = self._rgb_seq
+                self._sample_beta_targets_frame(box_obs, drop_obs)
+                if stop_when_both_found and len(box_obs) >= 5 and len(drop_obs) >= 5:
+                    break
+
+        self.stop_base()
+
+    def discover_beta_targets(self):
+        """Visually discover both (box_x, box_y) and (drop_x, drop_y) inside Room Beta."""
+        self.get_logger().info(
+            '[Discovery] Searching Room Beta for orange cube and crimson drop pad via RGB-D...'
+        )
+        box_obs = []
+        drop_obs = []
+
+        # 0. Ensure robot is clear of the narrow Room Beta doorway before scanning/planning
+        self.nudge_clear_of_doorway()
+
+        # 1. Seed from passive detections published by doorway_navigator
+        self.spin_for(0.5)
+        if self.discovered_box_msg and 'x' in self.discovered_box_msg:
+            bx = float(self.discovered_box_msg['x'])
+            by = float(self.discovered_box_msg['y'])
+            box_obs.extend([(bx, by)] * min(3, int(self.discovered_box_msg.get('observations', 1))))
+            self.get_logger().info(f'[Discovery] Seeded box pose ({bx:.2f}, {by:.2f}) from passive mapper.')
+        if self.discovered_drop_msg and 'x' in self.discovered_drop_msg:
+            dx = float(self.discovered_drop_msg['x'])
+            dy = float(self.discovered_drop_msg['y'])
+            drop_obs.extend([(dx, dy)] * min(3, int(self.discovered_drop_msg.get('observations', 1))))
+            self.get_logger().info(f'[Discovery] Seeded drop pose ({dx:.2f}, {dy:.2f}) from passive mapper.')
+
+        # 2. Initial 360-degree scan inside Room Beta
+        if len(box_obs) < 2 or len(drop_obs) < 2:
+            self._rotate_and_scan_beta(box_obs, drop_obs, target_angle=2.0 * math.pi + 0.15)
+            self.get_logger().info(
+                f'[Discovery] After initial 360° scan: box_obs={len(box_obs)}, drop_obs={len(drop_obs)}'
+            )
+
+        # 3. Active viewpoint search across free space in Room Beta until both targets are seen
+        if len(box_obs) < 2 or len(drop_obs) < 2:
+            grid, ox, oy, res = self.get_map_array()
+            pose = self.get_pose()
+            if grid is not None and pose is not None:
+                viewpoints = sample_room_search_viewpoints(
+                    (pose[0], pose[1]), grid, ox, oy, res,
+                    max_radius_m=6.5, min_clearance_m=0.40, spacing_m=1.7,
+                    max_points=8, forward_hint_yaw=pose[2],
+                )
+                self.get_logger().info(
+                    f'[Discovery] Visiting up to {len(viewpoints)} Room Beta viewpoints to locate missing target(s)...'
+                )
+                for idx, (vx, vy) in enumerate(viewpoints, start=1):
+                    if len(box_obs) >= 2 and len(drop_obs) >= 2:
+                        break
+                    self.navigate_to_pose(
+                        vx, vy, 0.0, f'Beta Search Viewpoint {idx}',
+                        fine_align=False, pos_tol=0.18,
+                        max_nav2_retries=0, nav2_timeout_sec=45.0,
+                    )
+                    if self.latest_rgb is not None:
+                        fl, _, _ = classify_floor_color(self.latest_rgb)
+                        if fl == 'YELLOW':
+                            continue
+                    self._rotate_and_scan_beta(box_obs, drop_obs, target_angle=2.0 * math.pi)
+                    self.get_logger().info(
+                        f'[Discovery] Viewpoint {idx}: box_obs={len(box_obs)}, drop_obs={len(drop_obs)}'
+                    )
+
+        box_xy = estimate_cluster_centroid(box_obs) if box_obs else None
+        drop_xy = estimate_cluster_centroid(drop_obs) if drop_obs else None
+
+        if box_xy is None:
+            self.get_logger().error('[Discovery] Failed to visually detect Beta orange cube!')
+        else:
+            self.get_logger().info(
+                f'[Discovery] Localized Beta Cube at ({box_xy[0]:.3f}, {box_xy[1]:.3f}) '
+                f'({len(box_obs)} obs)'
+            )
+
+        if drop_xy is None:
+            self.get_logger().error('[Discovery] Failed to visually detect Beta drop pad!')
+        else:
+            self.get_logger().info(
+                f'[Discovery] Localized Beta Drop Spot at ({drop_xy[0]:.3f}, {drop_xy[1]:.3f}) '
+                f'({len(drop_obs)} obs)'
+            )
+
+        return box_xy, drop_xy
+
+    def refine_box_pose_rgbd(self, box_x: float, box_y: float, duration_sec: float = 0.9):
+        """At pre-grasp (~0.6 m), take fresh close-range RGB-D observations of the cube."""
+        obs = []
+        end = time.time() + duration_sec
+        last_seq = -1
+        while rclpy.ok() and time.time() < end:
+            rclpy.spin_once(self, timeout_sec=0.04)
+            if self._rgb_seq == last_seq or self.latest_rgb is None:
+                continue
+            last_seq = self._rgb_seq
+            T_map_cam = self.get_cam_transform()
+            if T_map_cam is None:
+                continue
+            intrinsics = intrinsics_from_camera_info(self.camera_info)
+            det = detect_orange_cube_map(
+                self.latest_rgb, self.latest_depth, intrinsics, T_map_cam, max_range=1.8
+            )
+            if det is not None and math.hypot(det[0] - box_x, det[1] - box_y) <= 0.45:
+                obs.append((det[0], det[1]))
+
+        if not obs:
+            return box_x, box_y
+        refined = estimate_cluster_centroid(obs, max_cluster_radius=0.20)
+        if refined is None:
+            return box_x, box_y
+        self.get_logger().info(
+            f'[Discovery] Close-range cube refinement: ({box_x:.3f}, {box_y:.3f}) -> '
+            f'({refined[0]:.3f}, {refined[1]:.3f}) ({len(obs)} frames)'
+        )
+        return refined[0], refined[1]
+
+    def refine_drop_pose_rgbd(self, drop_x: float, drop_y: float, duration_sec: float = 0.9):
+        """At pre-drop, refine drop-spot centre from close range if visible."""
+        obs = []
+        end = time.time() + duration_sec
+        last_seq = -1
+        while rclpy.ok() and time.time() < end:
+            rclpy.spin_once(self, timeout_sec=0.04)
+            if self._rgb_seq == last_seq or self.latest_rgb is None:
+                continue
+            last_seq = self._rgb_seq
+            T_map_cam = self.get_cam_transform()
+            if T_map_cam is None:
+                continue
+            intrinsics = intrinsics_from_camera_info(self.camera_info)
+            det = detect_drop_spot_map(
+                self.latest_rgb, self.latest_depth, intrinsics, T_map_cam, max_range=2.2
+            )
+            if det is not None and math.hypot(det[0] - drop_x, det[1] - drop_y) <= 0.45:
+                obs.append((det[0], det[1]))
+
+        if not obs:
+            return drop_x, drop_y
+        refined = estimate_cluster_centroid(obs, max_cluster_radius=0.25)
+        if refined is None:
+            return drop_x, drop_y
+        self.get_logger().info(
+            f'[Discovery] Close-range drop refinement: ({drop_x:.3f}, {drop_y:.3f}) -> '
+            f'({refined[0]:.3f}, {refined[1]:.3f}) ({len(obs)} frames)'
+        )
+        return refined[0], refined[1]
+
+    # --- Arm & Gripper Control -----------------------------------------------
     def set_detachable_joint(self, attach: bool):
         pub = self.attach_pub if attach else self.detach_pub
         action_str = 'ATTACH' if attach else 'DETACH'
@@ -489,10 +807,9 @@ class BetaPickAndPlace(Node):
         traj.points.append(pt)
         self.arm_pub.publish(traj)
 
-        # Wait until /joint_states actually reaches the target pose (accounting for slow
-        # Gazebo Real-Time Factor) plus a short settle pause so the arm has zero velocity.
         start = time.time()
-        max_wait_wall = max(12.0, duration_sec * 6.0)
+        max_wait_wall = max(35.0, duration_sec * 14.0)
+        reached = False
         while rclpy.ok() and (time.time() - start) < max_wait_wall:
             rclpy.spin_once(self, timeout_sec=0.04)
             if all(j in self.arm_joint_positions for j in self.ARM_JOINTS):
@@ -501,8 +818,13 @@ class BetaPickAndPlace(Node):
                     for j, target in zip(self.ARM_JOINTS, positions)
                 )
                 if max_err < 0.035 and (time.time() - start) >= duration_sec * 0.8:
+                    reached = True
                     break
-        # Let physics settle so the arm is completely stationary before attach/detach
+        if not reached:
+            self.get_logger().warn(
+                f'[Arm] Timed out waiting for {description or positions} '
+                f'(actual={ {j: round(self.arm_joint_positions.get(j, float("nan")), 3) for j in self.ARM_JOINTS} })'
+            )
         self.spin_for(0.6)
 
     def control_gripper(self, position: float, description: str = ''):
@@ -532,7 +854,8 @@ class BetaPickAndPlace(Node):
         yaw_tol: float = 0.04,
         max_lin: float = 0.22,
         max_ang: float = 0.75,
-        timeout_sec: float = 180.0,
+        timeout_sec: float = 60.0,
+        obstacle_guard: bool = True,
     ) -> bool:
         """Drive smoothly to (target_x, target_y, target_yaw) using /cmd_vel and get_pose()."""
         start = time.time()
@@ -568,6 +891,14 @@ class BetaPickAndPlace(Node):
                 if dist <= pos_tol:
                     phase = 'FINAL_YAW'
                     continue
+                if obstacle_guard and dist > 0.20:
+                    front_min = self._min_scan_in_arc(0.0, half_arc_rad=0.45)
+                    if front_min < 0.30:
+                        self.stop_base()
+                        self.get_logger().warn(
+                            f'[Closed-Loop Guard] Obstacle at {front_min:.2f} m ahead; stopping safely.'
+                        )
+                        return False
                 err_yaw = normalize_angle(heading_to_goal - yaw)
                 if abs(err_yaw) > 0.45 and dist > 0.10:
                     phase = 'ROTATE_TO_GOAL'
@@ -601,8 +932,14 @@ class BetaPickAndPlace(Node):
         label: str = '',
         fine_align: bool = True,
         pos_tol: float = 0.03,
+        max_nav2_retries: int = 2,
+        nav2_timeout_sec: float = 120.0,
     ) -> bool:
-        """Navigate using Nav2 if available, then refine with closed-loop control."""
+        """Navigate using Nav2 if available, then refine short residual error with closed-loop.
+
+        Never falls back to blind straight-line closed-loop driving across a room
+        (> 0.95 m) when Nav2 is active, preventing wall collisions and odometry drift.
+        """
         if label:
             self.get_logger().info(
                 f'[Navigate] -> {label}: ({x:.2f}, {y:.2f}, yaw={yaw:.2f})'
@@ -610,43 +947,69 @@ class BetaPickAndPlace(Node):
 
         nav2_available = self.nav_client.wait_for_server(timeout_sec=1.5)
         if nav2_available:
-            goal = NavigateToPose.Goal()
-            goal.pose = PoseStamped()
-            goal.pose.header.frame_id = 'map'
-            goal.pose.header.stamp = Time().to_msg()
-            goal.pose.pose.position.x = float(x)
-            goal.pose.pose.position.y = float(y)
-            goal.pose.pose.orientation.z = math.sin(yaw / 2.0)
-            goal.pose.pose.orientation.w = math.cos(yaw / 2.0)
+            nav2_ok = False
+            for attempt in range(1, max_nav2_retries + 2):
+                goal = NavigateToPose.Goal()
+                goal.pose = PoseStamped()
+                goal.pose.header.frame_id = 'map'
+                goal.pose.header.stamp = Time().to_msg()
+                goal.pose.pose.position.x = float(x)
+                goal.pose.pose.position.y = float(y)
+                goal.pose.pose.orientation.z = math.sin(yaw / 2.0)
+                goal.pose.pose.orientation.w = math.cos(yaw / 2.0)
 
-            send_future = self.nav_client.send_goal_async(goal)
-            while rclpy.ok() and not send_future.done():
-                rclpy.spin_once(self, timeout_sec=0.05)
-            handle = send_future.result()
+                send_future = self.nav_client.send_goal_async(goal)
+                while rclpy.ok() and not send_future.done():
+                    rclpy.spin_once(self, timeout_sec=0.05)
+                handle = send_future.result()
 
-            if handle and handle.accepted:
-                res_future = handle.get_result_async()
-                start = time.time()
-                while rclpy.ok() and not res_future.done() and (time.time() - start) < 120.0:
-                    rclpy.spin_once(self, timeout_sec=0.1)
-                if not res_future.done():
-                    handle.cancel_goal_async()
-                    self.spin_for(0.5)
-                    self.get_logger().warn(f'Nav2 goal {label} timed out; using closed-loop.')
-                    return self.drive_to_pose_closed_loop(x, y, yaw, pos_tol=pos_tol)
-                status = res_future.result().status
-                if status != 4:
+                if handle and handle.accepted:
+                    res_future = handle.get_result_async()
+                    start = time.time()
+                    while rclpy.ok() and not res_future.done() and (time.time() - start) < nav2_timeout_sec:
+                        rclpy.spin_once(self, timeout_sec=0.1)
+                    if not res_future.done():
+                        handle.cancel_goal_async()
+                        self.spin_for(0.5)
+                        self.get_logger().warn(
+                            f'Nav2 goal {label} timed out (attempt {attempt}).'
+                        )
+                    else:
+                        status = res_future.result().status
+                        if status == 4:
+                            nav2_ok = True
+                            break
+                        self.get_logger().warn(
+                            f'Nav2 goal {label} ended with status {status} (attempt {attempt}).'
+                        )
+                else:
                     self.get_logger().warn(
-                        f'Nav2 goal {label} ended with status {status}; using closed-loop.'
+                        f'Nav2 rejected goal {label} (attempt {attempt}).'
                     )
-                    return self.drive_to_pose_closed_loop(x, y, yaw, pos_tol=pos_tol)
-            else:
-                self.get_logger().warn(f'Nav2 rejected goal {label}; using closed-loop.')
-                return self.drive_to_pose_closed_loop(x, y, yaw, pos_tol=pos_tol)
 
-        if fine_align or not nav2_available:
-            return self.drive_to_pose_closed_loop(x, y, yaw, pos_tol=pos_tol)
-        return True
+                if attempt <= max_nav2_retries:
+                    self.clear_costmaps()
+                    self.spin_for(0.5)
+
+            pose = self.get_pose()
+            rem_dist = math.hypot(x - pose[0], y - pose[1]) if pose is not None else math.inf
+            if not nav2_ok and rem_dist > 0.95:
+                self.get_logger().error(
+                    f'Nav2 failed to reach {label} ({rem_dist:.2f} m away); '
+                    'refusing blind long-distance closed-loop drive.'
+                )
+                return False
+
+            if fine_align:
+                return self.drive_to_pose_closed_loop(
+                    x, y, yaw, pos_tol=pos_tol, obstacle_guard=True
+                )
+            return nav2_ok
+
+        # Nav2 not running (e.g. stripped-down practice world home_tasks.sdf)
+        return self.drive_to_pose_closed_loop(
+            x, y, yaw, pos_tol=pos_tol, obstacle_guard=False
+        )
 
     def align_with_orange_cube_camera(self, timeout_sec: float = 8.0):
         """Optionally refine heading toward the orange cube using the RGB camera."""
@@ -659,16 +1022,13 @@ class BetaPickAndPlace(Node):
             if self.latest_rgb is None:
                 continue
 
-            rgb = self.latest_rgb.astype(np.float32)
-            r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
-            # Orange cube RGB ~ (240, 158, 38)
-            cube_mask = (r > 165) & (g > 80) & (g < 195) & (b < 95) & ((r - b) > 90)
+            cube_mask = segment_orange_cube(self.latest_rgb)
             ys, xs = np.nonzero(cube_mask)
             if len(xs) < 25:
                 break
 
             cx = float(np.mean(xs))
-            err_x = (cx - (rgb.shape[1] / 2.0)) / (rgb.shape[1] / 2.0)
+            err_x = (cx - (self.latest_rgb.shape[1] / 2.0)) / (self.latest_rgb.shape[1] / 2.0)
             if abs(err_x) <= 0.06:
                 self.stop_base()
                 self.get_logger().info(
@@ -692,6 +1052,12 @@ class BetaPickAndPlace(Node):
         start = time.time()
         while rclpy.ok() and (time.time() - start) < 25.0:
             rclpy.spin_once(self, timeout_sec=0.02)
+            rear_min = self._min_scan_in_arc(math.pi, half_arc_rad=0.45)
+            if rear_min < 0.30:
+                self.get_logger().warn(
+                    f'[Backup Guard] Obstacle {rear_min:.2f} m behind robot; stopping backup early.'
+                )
+                break
             pose = self.get_pose()
             if pose is not None and math.hypot(pose[0] - x0, pose[1] - y0) >= distance_m:
                 break
@@ -700,7 +1066,6 @@ class BetaPickAndPlace(Node):
 
     # --- Main Pick and Place Mission -----------------------------------------
     def execute_mission(self) -> bool:
-        # Wait for initial odometry / TF data
         self.get_logger().info('Waiting for robot pose (/odom or TF)...')
         start_wait = time.time()
         while rclpy.ok() and self.get_pose() is None and (time.time() - start_wait) < 15.0:
@@ -710,14 +1075,14 @@ class BetaPickAndPlace(Node):
             self.get_logger().error('No pose available on /odom or TF!')
             return False
 
-        # If wait_for_ready is enabled, wait for /room2/ready trigger
         if self.get_parameter('wait_for_ready').value:
-            self.get_logger().info('Waiting for /room2/ready trigger...')
-            while rclpy.ok() and not self.room2_ready:
+            self.get_logger().info('Waiting for /room_beta/ready trigger...')
+            while rclpy.ok() and not self.room_beta_ready:
                 rclpy.spin_once(self, timeout_sec=0.2)
             if not rclpy.ok():
                 return False
 
+        discover = bool(self.get_parameter('discover_targets').value)
         box_x = float(self.get_parameter('box_x').value)
         box_y = float(self.get_parameter('box_y').value)
         drop_x = float(self.get_parameter('drop_x').value)
@@ -778,8 +1143,7 @@ class BetaPickAndPlace(Node):
 
         self.get_logger().info('=' * 60)
         self.get_logger().info(
-            f'Starting Phase D: Beta Pick & Place | '
-            f'Box=({box_x:.2f}, {box_y:.2f}) -> Drop=({drop_x:.2f}, {drop_y:.2f})'
+            f'Starting Phase D: Beta Pick & Place | discover_targets={discover}'
         )
         self.get_logger().info('=' * 60)
 
@@ -789,34 +1153,56 @@ class BetaPickAndPlace(Node):
             self.control_gripper(self.GRIPPER_OPEN, 'Opening gripper')
             self.move_arm(self.HOME_POSE, duration_sec=2.0, description='Moving arm to Home Pose')
 
-            # 2. Route into Room 2 (Beta) if currently outside Room 2
-            cur_x, cur_y, _ = self.get_pose()
-            # Room 2 Beta is north of wall y = 6.21 in map frame (world y = 7.0) and east of x = -9.21
-            if cur_y < 6.40 or cur_x < -9.21:
-                if cur_y > 6.40 and cur_x < -9.21:
-                    # Currently inside Room 1 (Alpha): exit Door 1 into Hall first
+            # 2. Target localization (autonomous visual search vs standalone parameter coords)
+            if discover:
+                box_xy, drop_xy = self.discover_beta_targets()
+                if box_xy is None:
+                    failure_reasons.append('box_not_found')
+                    return False
+                if drop_xy is None:
+                    failure_reasons.append('drop_spot_not_found')
+                    return False
+                box_x, box_y = box_xy
+                drop_x, drop_y = drop_xy
+                eval_record['box_target_x'] = box_x
+                eval_record['box_target_y'] = box_y
+                eval_record['drop_target_x'] = drop_x
+                eval_record['drop_target_y'] = drop_y
+            else:
+                # Standalone mode: route into Room Beta if currently outside
+                cur_x, cur_y, _ = self.get_pose()
+                if cur_y < 6.40 or cur_x < -9.21:
+                    if cur_y > 6.40 and cur_x < -9.21:
+                        self.navigate_to_pose(
+                            -14.61, 5.20, -math.pi / 2.0, 'Exit Room Alpha Doorway',
+                            fine_align=False, pos_tol=0.15,
+                        )
                     self.navigate_to_pose(
-                        -14.61, 5.20, -math.pi / 2.0, 'Exit Room 1 Doorway',
+                        -3.81, 5.20, math.pi / 2.0, 'Door Beta Approach (Hall)',
                         fine_align=False, pos_tol=0.15,
                     )
-                # Go to Hallway south of Door 2 (Beta entrance), then through Door 2
-                self.navigate_to_pose(
-                    -3.81, 5.20, math.pi / 2.0, 'Beta Doorway Approach (Hall)',
-                    fine_align=False, pos_tol=0.15,
-                )
-                self.navigate_to_pose(
-                    -3.81, 7.42, math.pi, 'Inside Beta Room Entrance',
-                    fine_align=False, pos_tol=0.12,
-                )
+                    self.navigate_to_pose(
+                        -3.81, 7.42, math.pi, 'Inside Room Beta Entrance',
+                        fine_align=False, pos_tol=0.12,
+                    )
 
-            # 3. Approach the Beta Cube from the East (facing West, yaw = pi)
-            # Stop at box_x + 0.60 first so Nav2 stays outside the static map's
-            # inflation radius around the cube, then close in with closed-loop control.
-            pre_grasp_x = box_x + 0.60
-            pre_grasp_y = box_y
-            grasp_x = box_x + self.GRASP_STANDOFF_M
-            grasp_y = box_y
-            grasp_yaw = math.pi
+            self.get_logger().info(
+                f'Active Targets: Box=({box_x:.2f}, {box_y:.2f}) -> Drop=({drop_x:.2f}, {drop_y:.2f})'
+            )
+
+            # 3. Approach the Beta Cube (dynamic collision-free approach angle when discovering)
+            if discover:
+                grid, ox, oy, res = self.get_map_array()
+                cur_pose = self.get_pose()
+                robot_xy = (cur_pose[0], cur_pose[1]) if cur_pose else None
+                pre_grasp_x, pre_grasp_y, grasp_yaw = select_approach_pose(
+                    box_x, box_y, 0.62, grid, ox, oy, res,
+                    robot_xy=robot_xy, clearance_m=0.42, ignore_target_radius_m=0.18,
+                )
+            else:
+                grasp_yaw = math.pi
+                pre_grasp_x = box_x - 0.60 * math.cos(grasp_yaw)
+                pre_grasp_y = box_y - 0.60 * math.sin(grasp_yaw)
 
             if not self.navigate_to_pose(
                 pre_grasp_x, pre_grasp_y, grasp_yaw, 'Pre-Grasp Pose',
@@ -824,13 +1210,26 @@ class BetaPickAndPlace(Node):
             ):
                 self.get_logger().warn('Pre-grasp pose had residual error; continuing to grasp pose.')
 
+            # Close-range RGB-D refinement at ~0.6 m before closing in
+            if discover:
+                box_x, box_y = self.refine_box_pose_rgbd(box_x, box_y)
+                eval_record['box_target_x'] = box_x
+                eval_record['box_target_y'] = box_y
+                cur_pose = self.get_pose()
+                if cur_pose is not None:
+                    grasp_yaw = math.atan2(box_y - cur_pose[1], box_x - cur_pose[0])
+
+            grasp_x = box_x - self.GRASP_STANDOFF_M * math.cos(grasp_yaw)
+            grasp_y = box_y - self.GRASP_STANDOFF_M * math.sin(grasp_yaw)
+
             self.move_arm(
                 self.PRE_PICK_POSE, duration_sec=1.8, description='Preparing arm for pick'
             )
 
-            # Fine approach to exact grasp standoff distance
+            # Fine approach to exact grasp standoff distance (disable front guard since cube is ahead)
             self.drive_to_pose_closed_loop(
-                grasp_x, grasp_y, grasp_yaw, pos_tol=0.02, yaw_tol=0.03, max_lin=0.10
+                grasp_x, grasp_y, grasp_yaw, pos_tol=0.02, yaw_tol=0.03,
+                max_lin=0.10, obstacle_guard=False,
             )
             self.align_with_orange_cube_camera(timeout_sec=5.0)
 
@@ -840,7 +1239,6 @@ class BetaPickAndPlace(Node):
             pick_pose = self.get_pose()
             if pick_pose is not None:
                 px, py, pyaw = pick_pose
-                # Exact local offset of the cube centre in base_footprint frame at pick time
                 dx_world = box_x - px
                 dy_world = box_y - py
                 held_dx_local = dx_world * math.cos(pyaw) + dy_world * math.sin(pyaw)
@@ -944,33 +1342,57 @@ class BetaPickAndPlace(Node):
                 f'lift_dz={_fmt_float(eval_record["cube_lift_delta_z"], 3) or "N/A"} m'
             )
 
-            # Back up 0.38 m out of the static map's obstacle inflation zone around
-            # the cube's original position before asking Nav2 to plan to the drop spot.
+            # Back up out of the static map's obstacle inflation zone around the cube,
+            # then clear Nav2 costmaps of any transient hits recorded during the arm lift.
             self.get_logger().info('[Base] Backing out of static map cube inflation zone...')
             self.backup_distance(distance_m=0.38, speed=0.14)
+            self.clear_costmaps()
+            self.spin_for(0.4)
 
-            # 5. Carry Cube to the Beta Drop Spot (-0.23, 8.51)
-            # Route via (-3.81, drop_y) to stay in the clear corridor north of meeting_table
-            self.navigate_to_pose(
-                -3.81, drop_y, 0.0, 'Room 2 Clear Corridor Waypoint',
-                fine_align=False, pos_tol=0.15,
-            )
+            # 5. Carry Cube to the Beta Drop Spot
+            if discover:
+                # Choose collision-free pre-drop pose dynamically from live SLAM /map
+                # with clearance >= Nav2's 0.38 m inflation_radius so Nav2 always accepts it.
+                grid, ox, oy, res = self.get_map_array()
+                cur_pose = self.get_pose()
+                robot_xy = (cur_pose[0], cur_pose[1]) if cur_pose else None
+                pre_drop_x, pre_drop_y, place_yaw = select_approach_pose(
+                    drop_x, drop_y, held_dx_local + 0.36, grid, ox, oy, res,
+                    robot_xy=robot_xy, clearance_m=0.42, ignore_target_radius_m=0.0,
+                )
+            else:
+                self.navigate_to_pose(
+                    -3.81, drop_y, 0.0, 'Room Beta Clear Corridor Waypoint',
+                    fine_align=False, pos_tol=0.15,
+                )
+                place_yaw = 0.0
+                pre_drop_x = drop_x - (held_dx_local + 0.28)
+                pre_drop_y = drop_y
 
-            # Compute exact robot stop pose so the held cube centre lands dead-centre on (drop_x, drop_y)
-            place_yaw = 0.0
+            if not self.navigate_to_pose(
+                pre_drop_x, pre_drop_y, place_yaw, 'Pre-Drop Pose',
+                fine_align=True, pos_tol=0.05,
+            ):
+                failure_reasons.append('pre_drop_nav_failed')
+                return False
+
+            # Close-range drop pad refinement if visible from pre-drop pose
+            if discover:
+                drop_x, drop_y = self.refine_drop_pose_rgbd(drop_x, drop_y)
+                eval_record['drop_target_x'] = drop_x
+                eval_record['drop_target_y'] = drop_y
+                cur_pose = self.get_pose()
+                if cur_pose is not None:
+                    place_yaw = math.atan2(drop_y - cur_pose[1], drop_x - cur_pose[0])
+
+            # Compute exact robot stop pose so the held cube centre lands on (drop_x, drop_y)
             place_x = drop_x - (
                 held_dx_local * math.cos(place_yaw) - held_dy_local * math.sin(place_yaw)
             )
             place_y = drop_y - (
                 held_dx_local * math.sin(place_yaw) + held_dy_local * math.cos(place_yaw)
             )
-            pre_drop_x = place_x - 0.28
-            pre_drop_y = place_y
 
-            self.navigate_to_pose(
-                pre_drop_x, pre_drop_y, place_yaw, 'Pre-Drop Pose',
-                fine_align=True, pos_tol=0.04,
-            )
             self.drive_to_pose_closed_loop(
                 place_x, place_y, place_yaw, pos_tol=0.015, yaw_tol=0.025, max_lin=0.08
             )
@@ -1017,7 +1439,7 @@ class BetaPickAndPlace(Node):
             self.backup_distance(distance_m=0.25, speed=0.12)
             self.spin_for(0.4)
 
-            # --- Evaluation Measurement: Placement Distance Error (After Retract & Settle) ---
+            # --- Evaluation Measurement: Placement Distance Error ---
             place_done_t = time.time()
             eval_record['place_time_sec'] = (
                 (place_done_t - pick_done_t) if pick_done_t is not None else None
@@ -1067,7 +1489,7 @@ class BetaPickAndPlace(Node):
                 f'final_z={_fmt_float(eval_record["cube_final_z"], 3) or "N/A"} m'
             )
 
-            # 7. Publish completion signal so doorway_navigator / mission_manager can proceed
+            # 7. Publish completion signal so doorway_navigator / mission_supervisor can proceed
             for _ in range(3):
                 self.done_pub.publish(Bool(data=True))
                 self.spin_for(0.1)
@@ -1079,7 +1501,7 @@ class BetaPickAndPlace(Node):
             self.get_logger().info(
                 f'Phase D: Beta Pick & Place COMPLETE '
                 f'(pick={eval_record["pick_success"]}, place={eval_record["place_success"]}, '
-                f'mission={eval_record["mission_success"]})! (/room2/done published)'
+                f'mission={eval_record["mission_success"]})! (/room_beta/done published)'
             )
             self.get_logger().info('=' * 60)
             return eval_record['mission_success']

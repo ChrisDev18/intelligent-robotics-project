@@ -305,7 +305,7 @@
         <parameters>$(find robot_bringup)/config/ros2_controllers.yaml</parameters>
       </plugin>
 
-      <!-- DetachableJoint Plugin for Phase D (Room 2 Beta Pick & Place) -->
+      <!-- DetachableJoint Plugin for Phase D (Room Beta Pick & Place) -->
       <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
         <parent_link>${prefix}link5</parent_link>
         <child_model>beta_pick_item</child_model>

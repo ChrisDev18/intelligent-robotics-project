@@ -1,6 +1,6 @@
-# Phase D: Room 2 (Beta) Pick and Place (`beta_pick_place.py`)
+# Phase D: Room Beta Pick and Place (`beta_pick_place.py`)
 
-This document explains how to run, configure, and integrate the **Room 2 (Beta) Pick and Place** task node (`beta_pick_place.py`), as well as how its navigation, perception, kinematics, and Gazebo `DetachableJoint` grasping system work.
+This document explains how to run, configure, and integrate the **Room Beta Pick and Place** task node (`beta_pick_place.py`), as well as how its navigation, perception, kinematics, and Gazebo `DetachableJoint` grasping system work.
 
 ---
 
@@ -8,7 +8,7 @@ This document explains how to run, configure, and integrate the **Room 2 (Beta) 
 
 | File | Purpose |
 | :--- | :--- |
-| `src/robot_bringup/robot_bringup/beta_pick_place.py` | Main ROS 2 node implementing the Room 2 (Beta) pick-and-place mission (`ros2 run robot_bringup beta_pick_place`). |
+| `src/robot_bringup/robot_bringup/beta_pick_place.py` | Main ROS 2 node implementing the Room Beta pick-and-place mission (`ros2 run robot_bringup beta_pick_place`). |
 | `src/robot_bringup/urdf/turtlebot3_manipulation_gz.xacro` | Added `gz-sim-detachable-joint-system` (`DetachableJoint`) plugin connecting `${prefix}link5` (gripper palm) to `beta_pick_item::link`. |
 | `src/robot_bringup/config/bridge_params.yaml` | Bridged `/beta_pick_item/attach`, `/beta_pick_item/detach`, and read-only ground truth `/eval/gz_dynamic_poses` (`/world/empty/dynamic_pose/info`). |
 | `src/robot_bringup/tools/summarize_beta_eval.py` | Standalone CLI to aggregate pickup/placement distance error CSV logs into separate pick and place success rates. |
@@ -57,19 +57,19 @@ source install/setup.bash
 
 1. **Subprocess Run-and-Exit (Default — `wait_for_ready:=false`):**
    * `mission_manager.py` can invoke `ros2 run robot_bringup beta_pick_place`.
-   * The node executes the full pick-and-place sequence immediately, publishes `Bool(data=True)` on `/room2/done` (`TRANSIENT_LOCAL` QoS), and exits with **return code `0` on success** or **`1` on failure** (making 1-retry logic in `mission_manager.py` straightforward).
+   * The node executes the full pick-and-place sequence immediately, publishes `Bool(data=True)` on `/room_beta/done` (`TRANSIENT_LOCAL` QoS), and exits with **return code `0` on success** or **`1` on failure** (making 1-retry logic in `mission_supervisor.py` straightforward).
 2. **Topic Handoff Mode (`wait_for_ready:=true`):**
    * When launched upfront with:
      ```bash
      ros2 run robot_bringup beta_pick_place --ros-args -p wait_for_ready:=true
      ```
-   * The node waits for `Bool(data=True)` on `/room2/ready` (`TRANSIENT_LOCAL` QoS) before starting, then publishes `Bool(data=True)` on `/room2/done` upon completion.
+   * The node waits for `Bool(data=True)` on `/room_beta/ready` (`TRANSIENT_LOCAL` QoS) before starting, then publishes `Bool(data=True)` on `/room_beta/done` upon completion.
 
 ### Configurable ROS 2 Parameters
 
 | Parameter | Default | Description |
 | :--- | :--- | :--- |
-| `wait_for_ready` | `false` | Wait for `/room2/ready` (`std_msgs/msg/Bool`) before executing. |
+| `wait_for_ready` | `false` | Wait for `/room_beta/ready` (`std_msgs/msg/Bool`) before executing. |
 | `box_x` | `-6.35` | Target cube $x$ coordinate in `map` / `odom` frame (world `12.86`). |
 | `box_y` | `7.42` | Target cube $y$ coordinate in `map` / `odom` frame (world `8.21`). |
 | `drop_x` | `-0.23` | Target drop spot $x$ coordinate in `map` / `odom` frame (world `18.98`). |
@@ -93,9 +93,9 @@ source install/setup.bash
 * `get_pose()` queries TF (`map` $\rightarrow$ `base_footprint`) first and automatically falls back to `/odom` (`odom` $\rightarrow$ `base_footprint`) if SLAM/AMCL is not running.
 
 ### 3.2 Dual-Mode Navigation & Static Map Inflation Handling
-1. **Entering Room 2 (Beta):**
-   * If the robot starts outside Room 2 (e.g., at the hall spawn `(0, 0)` or inside Room 1 Alpha), it routes through the hallway (`(-3.81, 5.20)`) and through Door 2 into Room 2 (`(-3.81, 7.42)`).
-   * If already delivered to the Room 2 entrance by `doorway_navigator.py` or `mission_manager.py`, it proceeds directly to the cube.
+1. **Entering Room Beta:**
+   * If the robot starts outside Room Beta (e.g., at the hall spawn `(0, 0)` or inside Room Alpha), it routes through the hallway (`(-3.81, 5.20)`) and through Door Beta into Room Beta (`(-3.81, 7.42)`).
+   * If already delivered to the Room Beta entrance by `doorway_navigator.py` or `mission_supervisor.py`, it proceeds directly to the cube.
 2. **Pre-Grasp & Static Map Obstacle Clearance:**
    * Because the saved map (`home_map.pgm`) was recorded while `beta_pick_item` sat at `(-6.35, 7.42)`, the cube's initial footprint is baked into the static map with a `0.45 m` inflation radius.
    * `beta_pick_place.py` uses Nav2 (`navigate_to_pose`) to travel to a safe pre-grasp pose just outside that inflation zone (`(-5.75, 7.42)`, `yaw = pi`), then uses closed-loop `/cmd_vel` control (`drive_to_pose_closed_loop`) and front RGB camera visual servoing (`align_with_orange_cube_camera`) to close in to the exact grasp standoff (`0.28 m` from cube center).

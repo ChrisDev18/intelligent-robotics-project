@@ -4,10 +4,12 @@
     ros2 launch robot_bringup mission.launch.py humans:=true     # with walking humans
 
 Starts explore.launch.py (robot, SLAM, Nav2, frontier explorer; no return home,
-because doorway_navigator does that at the end), doorway_navigator waiting for
-each room task, and mission_supervisor, which runs alpha_cleaning and
-beta_pick_place when their rooms are ready, retries each once, and logs
-results to log/mission_results.csv.
+because doorway_navigator does that at the end), doorway_navigator (interleaved
+room-discovery + passive target mapping), and mission_supervisor, which runs
+alpha_cleaning and beta_pick_place in whichever room is entered first (with
+autonomous visual target discovery enabled), resumes exploration until both rooms
+and 100% of the house are mapped, then returns home and logs results to
+log/mission_results.csv.
 
 Watch progress with:  ros2 topic echo /mission_status
 """
@@ -37,13 +39,24 @@ def generate_launch_description():
 
     doorway_navigator = Node(
         package='robot_bringup', executable='doorway_navigator', name='doorway_navigator',
-        output='screen', parameters=[{'wait_for_teammates': True}],
+        output='screen', parameters=[{
+            'wait_for_teammates': True,
+            'interleaved_tasks': ParameterValue(
+                LaunchConfiguration('interleaved_tasks'), value_type=bool
+            ),
+        }],
     )
 
     supervisor = Node(
         package='robot_bringup', executable='mission_supervisor', name='mission_supervisor',
-        output='screen', parameters=[{'max_attempts': ParameterValue(LaunchConfiguration('max_attempts'),
-                                                    value_type=int)}],
+        output='screen', parameters=[{
+            'max_attempts': ParameterValue(
+                LaunchConfiguration('max_attempts'), value_type=int
+            ),
+            'discover_targets': ParameterValue(
+                LaunchConfiguration('discover_targets'), value_type=bool
+            ),
+        }],
     )
 
     return LaunchDescription([
@@ -52,6 +65,10 @@ def generate_launch_description():
         DeclareLaunchArgument('rviz', default_value='true'),
         DeclareLaunchArgument('max_attempts', default_value='2',
                               description='Tries per room task, including the first'),
+        DeclareLaunchArgument('discover_targets', default_value='true',
+                              description='Visually discover cleaning zone, box, and drop spot'),
+        DeclareLaunchArgument('interleaved_tasks', default_value='true',
+                              description='Pause exploration and run each room task upon entry'),
         explore,
         doorway_navigator,
         supervisor,

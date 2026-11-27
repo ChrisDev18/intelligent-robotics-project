@@ -33,8 +33,8 @@ src/
     │
     ├── robot_bringup/            # Inner Python module directory (all ROS 2 console_scripts)
     │   ├── __init__.py           # Python package marker
-    │   ├── alpha_cleaning.py     # Phase C: Room 1 (Alpha) vacuum cleaning task node
-    │   ├── beta_pick_place.py    # Phase D: Room 2 (Beta) object pick-and-place task node
+    │   ├── alpha_cleaning.py     # Phase C: Room Alpha vacuum cleaning task node
+    │   ├── beta_pick_place.py    # Phase D: Room Beta object pick-and-place task node
     │   ├── doorway_navigator.py  # Room floor-color discovery + Nav2 doorway handoff controller
     │   ├── frontier_explorer.py  # Autonomous SLAM frontier exploration (/exploration_done, /exploration_pause)
     │   ├── save_map.py           # Live /map saver node (.pgm + .yaml)
@@ -58,7 +58,7 @@ src/
     │   └── turtlebot3_manipulation.ros2_control.xacro # gz_ros2_control hardware interfaces for arm and gripper joints
     │
     ├── worlds/                   # Generated Gazebo Harmonic SDF worlds
-    │   ├── home.sdf              # Hall + Room 1 Alpha + Room 2 Beta with furniture & 3 walking humans
+    │   ├── home.sdf              # Hall + Room Alpha + Room Beta with furniture & 3 walking humans
     │   ├── home_no_humans.sdf    # Same world without humans (used for SLAM mapping)
     │   └── home_tasks.sdf        # Stripped-down walls/floors + Beta cube practice world
     │
@@ -95,8 +95,8 @@ ros2 pkg create --build-type ament_python robot_bringup \
 Our project requires a single mobile manipulator capable of:
 1. **Mapping & Navigation:** Exploring an unknown multi-room environment using 2D LiDAR + wheel odometry + IMU.
 2. **Room Identification:** Recognising room wall/floor colours (Blue vs. Green) and detecting objects using a front-mounted RGB-D camera.
-3. **Task 1 (Vacuum Cleaning in Room 1):** Sweeping the floor with an under-chassis vacuum attachment and hoovering up dirt particles.
-4. **Task 2 (Object Pick-and-Place in Room 2):** Reaching, grasping, lifting, and relocating objects using a 4-DOF manipulator arm and parallel-jaw gripper.
+3. **Task 1 (Vacuum Cleaning in Room Alpha):** Sweeping the floor with an under-chassis vacuum attachment and hoovering up dirt particles.
+4. **Task 2 (Object Pick-and-Place in Room Beta):** Reaching, grasping, lifting, and relocating objects using a 4-DOF manipulator arm and parallel-jaw gripper.
 
 ```mermaid
 flowchart TB
@@ -120,7 +120,7 @@ flowchart TB
     subgraph Nodes["ROS 2 Control & Demo Nodes (robot_bringup)"]
         TestNode["test_robot.py\n(Full Sensor, Base, Arm & Gripper Verification)"]
         VacDemo["vacuum_demo.py\n(Spawns Dirt Particles & Hoovers Them Under vacuum_link)"]
-        Mission["mission_supervisor.py\n(Phase E: runs Room 1 & Room 2 tasks in order)"]
+        Mission["mission_supervisor.py\n(Phase E: runs Room Alpha & Room Beta tasks)"]
     end
 
     Robot <--> Gazebo
@@ -277,7 +277,7 @@ When you run `colcon build` and launch the project for the first time, ROS 2 and
 
 ---
 
-## Teammate Task Integration (Room 1 Cleaning & Room 2 Pick-and-Place)
+## Teammate Task Integration (Room Alpha Cleaning & Room Beta Pick-and-Place)
 
 ### 1. First-Time Setup & World Generation
 - Generate worlds (furniture/obstacles + humans, no-humans for SLAM, and task practice world):
@@ -293,8 +293,8 @@ Origin `(0, 0)` = bottom-left outer corner, `x` east, `y` north (metres).
 
 | Item | World Position |
 |---|---|
-| Door 1 (Alpha) | `x` 4.0–5.2, `y` 7.0 |
-| Door 2 (Beta) | `x` 14.8–16.0, `y` 7.0 |
+| Door Alpha | `x` 4.0–5.2, `y` 7.0 |
+| Door Beta | `x` 14.8–16.0, `y` 7.0 |
 | Robot spawn | `(19.21, 0.79)`, yaw `1.5708` |
 | Alpha clean zone | centre `(6.79, 9.14)`, `2.29 × 1.57 m` |
 | Beta pick item | `(12.86, 8.21)`, `0.15 m` cube, `0.2 kg` |
@@ -305,13 +305,13 @@ Origin `(0, 0)` = bottom-left outer corner, `x` east, `y` north (metres).
   - Subscribes to `/exploration_pause` (`std_msgs/msg/Bool`) to pause/resume exploration
   - Publishes `True` to `/exploration_done` (`std_msgs/msg/Bool`, `TRANSIENT_LOCAL` QoS) when mapping is complete
   - Save the live map with `ros2 run robot_bringup save_map src/robot_bringup/maps/explored_map`
-- **Room 1 (Alpha — Yellow Floor, Vacuum Cleaning):**
-  - Subscribe to `/room1/ready` (`std_msgs/msg/Bool`, `TRANSIENT_LOCAL` QoS)
-  - Publish `True` to `/room1/done` (`std_msgs/msg/Bool`, `TRANSIENT_LOCAL` QoS) when finished
+- **Room Alpha (Yellow Floor, Vacuum Cleaning):**
+  - Subscribe to `/room_alpha/ready` (`std_msgs/msg/Bool`, `TRANSIENT_LOCAL` QoS)
+  - Publish `True` to `/room_alpha/done` (`std_msgs/msg/Bool`, `TRANSIENT_LOCAL` QoS) when finished
   - Controls: `/vacuum/active` (`Bool`), `/cmd_vel` (`Twist`), `navigate_to_pose`, `/world/empty/create` & `/world/empty/remove`
-- **Room 2 (Beta — Mint/Green Floor, Pick & Place):**
-  - Subscribe to `/room2/ready` (`std_msgs/msg/Bool`, `TRANSIENT_LOCAL` QoS)
-  - Publish `True` to `/room2/done` (`std_msgs/msg/Bool`, `TRANSIENT_LOCAL` QoS) when finished
+- **Room Beta (Mint/Green Floor, Pick & Place):**
+  - Subscribe to `/room_beta/ready` (`std_msgs/msg/Bool`, `TRANSIENT_LOCAL` QoS)
+  - Publish `True` to `/room_beta/done` (`std_msgs/msg/Bool`, `TRANSIENT_LOCAL` QoS) when finished
   - Controls: `/rgbd_camera/image`, `/rgbd_camera/depth_image`, `/arm_controller/joint_trajectory` (`joint1`..`joint4`), `/gripper_controller/gripper_cmd` (`0.018` open / `-0.005` close), `/beta_pick_item/attach` & `/beta_pick_item/detach`
 
 ### 4. Full Mission in One Command (Phase E)
@@ -321,11 +321,11 @@ ros2 launch robot_bringup mission.launch.py humans:=true    # with walking human
 ros2 topic echo /mission_status                             # watch progress (second terminal)
 ```
 Starts exploration (SLAM + Nav2 + frontier explorer), `doorway_navigator` and `mission_supervisor`:
-1. The robot explores the unknown house, then `doorway_navigator` drives to Alpha and publishes `/room1/ready`.
-2. `mission_supervisor` runs `alpha_cleaning`, retrying once if it fails. Then the same for Beta with `beta_pick_place`.
-3. If a task still fails, the supervisor publishes its `/roomN/done` itself so the mission carries on, and records the failure.
-4. `doorway_navigator` drives home. The supervisor publishes `done` (or `done_with_failures`) on `/mission_status`
-   and appends a row to `log/mission_results.csv`: exploration time, each task's result, attempts and time, and total time.
+1. The robot explores the unknown house; as soon as it enters either Room Alpha or Room Beta, `doorway_navigator` pauses exploration and publishes `/room_alpha/ready` or `/room_beta/ready`.
+2. `mission_supervisor` runs `alpha_cleaning` or `beta_pick_place` (with autonomous visual target discovery enabled), retrying once if it fails, then resumes exploration for the remaining room and rest of the house.
+3. If a task still fails, the supervisor publishes its `/room_alpha/done` or `/room_beta/done` itself so the mission carries on, and records the failure.
+4. Once both rooms and full house exploration complete, `doorway_navigator` drives home. The supervisor publishes `done` (or `done_with_failures`) on `/mission_status`
+   and appends a row to `log/mission_results.csv`: task order, exploration time, each task's result, attempts and time, and total time.
 
 ### 5. Running Pieces Separately
 - **Standalone Home World:** `ros2 launch robot_bringup world.launch.py` (or `humans:=false`)

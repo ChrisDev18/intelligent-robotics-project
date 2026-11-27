@@ -1,29 +1,28 @@
 #!/usr/bin/env python3
 """Phase E: mission supervisor for the full autonomous run.
 
-Runs alongside explore.launch.py and doorway_navigator (wait_for_teammates:=true):
+Supports both interleaved room-discovery execution (Room Alpha or Room Beta in
+whichever order the robot enters them first) and sequential execution:
 
-    explore  ->  /exploration_done
-    doorway_navigator drives to Alpha  ->  /room1/ready
-        supervisor runs alpha_cleaning (retries once)  ->  /room1/done
-    doorway_navigator drives to Beta   ->  /room2/ready
-        supervisor runs beta_pick_place (retries once) ->  /room2/done
-    doorway_navigator drives home      ->  supervisor sees the robot at home  ->  done
+    explore  <->  enter first room  ->  /room_X/ready -> task X -> /room_X/done -> resume explore
+             <->  enter second room ->  /room_Y/ready -> task Y -> /room_Y/done -> finish map
+             ->   /exploration_done ->  doorway_navigator drives home -> done
 
-If a task still fails after its retry, the supervisor publishes its /roomN/done
+If a task still fails after its retry, the supervisor publishes its /room_X/done
 itself so the mission carries on instead of waiting forever, and records the
 failure.
 
 Publishes /mission_status (std_msgs/String, latched): exploring, cleaning_alpha,
-beta_pick_place, returning_home, done (or done_with_failures).
+beta_pick_place, finishing_map, returning_home, done (or done_with_failures).
 Appends one row per run to log/mission_results.csv with stage times and results.
 
 Parameters
-  max_attempts    tries per task, including the first (default 2)
-  task_timeout    seconds before a task attempt is stopped (default 900)
-  home_x, home_y  where doorway_navigator parks at the end, map frame (default 0.5, 0.5)
-  home_radius     how close counts as home, metres (default 0.7)
-  results_csv     where to append results (default log/mission_results.csv)
+  max_attempts      tries per task, including the first (default 2)
+  task_timeout      seconds before a task attempt is stopped (default 900)
+  discover_targets  pass discover_targets:=true to task nodes (default True)
+  home_x, home_y    where doorway_navigator parks at the end, map frame (default 0.5, 0.5)
+  home_radius       how close counts as home, metres (default 0.7)
+  results_csv       where to append results (default log/mission_results.csv)
 """
 import csv
 import math
@@ -42,8 +41,8 @@ from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformListener
 
 TASKS = {
-    'room1': {'executable': 'alpha_cleaning', 'status': 'cleaning_alpha', 'label': 'Alpha cleaning'},
-    'room2': {'executable': 'beta_pick_place', 'status': 'beta_pick_place', 'label': 'Beta pick-and-place'},
+    'room_alpha': {'executable': 'alpha_cleaning', 'status': 'cleaning_alpha', 'label': 'Room Alpha cleaning'},
+    'room_beta': {'executable': 'beta_pick_place', 'status': 'beta_pick_place', 'label': 'Room Beta pick-and-place'},
 }
 
 
@@ -52,6 +51,7 @@ class MissionSupervisor(Node):
         super().__init__('mission_supervisor')
         self.max_attempts = int(self.declare_parameter('max_attempts', 2).value)
         self.task_timeout = float(self.declare_parameter('task_timeout', 900.0).value)
+        self.discover_targets = bool(self.declare_parameter('discover_targets', True).value)
         self.home_xy = (float(self.declare_parameter('home_x', 0.5).value),
                         float(self.declare_parameter('home_y', 0.5).value))
         self.home_radius = float(self.declare_parameter('home_radius', 0.7).value)
@@ -72,11 +72,16 @@ class MissionSupervisor(Node):
         self.t0 = time.monotonic()
         self.marks = {}                     # stage -> seconds since start (real time)
         self.results = {room: {'ok': None, 'attempts': 0, 'seconds': None} for room in TASKS}
+        self.task_order = []
         self.started = set()
+        self.exploration_done = False
         self.finished = False
         self.set_status('exploring')
         self.create_timer(2.0, self.check_home)
-        self.get_logger().info('Mission supervisor ready: waiting for exploration to finish.')
+        self.get_logger().info(
+            f'Mission supervisor ready (discover_targets={self.discover_targets}): '
+            'waiting for room triggers or exploration completion.'
+        )
 
     # --- helpers ----------------------------------------------------------
     def elapsed(self):
@@ -85,6 +90,9 @@ class MissionSupervisor(Node):
     def set_status(self, status):
         self.status_pub.publish(String(data=status))
         self.get_logger().info(f'[mission] {status}  (t = {self.elapsed():.0f} s)')
+
+    def all_tasks_finished(self):
+        return all(r['ok'] is not None for r in self.results.values())
 
     def robot_xy(self):
         try:
@@ -96,14 +104,18 @@ class MissionSupervisor(Node):
 
     # --- events -----------------------------------------------------------
     def on_exploration_done(self, msg):
-        if msg.data and 'exploration' not in self.marks:
+        if msg.data and not self.exploration_done:
+            self.exploration_done = True
             self.marks['exploration'] = self.elapsed()
             self.get_logger().info(f'Exploration finished after {self.marks["exploration"]:.0f} s')
+            if self.all_tasks_finished() and not self.finished:
+                self.set_status('returning_home')
 
     def on_ready(self, room, msg):
         if not msg.data or room in self.started:
             return
         self.started.add(room)
+        self.task_order.append(room)
         threading.Thread(target=self.run_task, args=(room,), daemon=True).start()
 
     def run_task(self, room):
@@ -114,7 +126,10 @@ class MissionSupervisor(Node):
         for attempt in range(1, self.max_attempts + 1):
             self.results[room]['attempts'] = attempt
             self.get_logger().info(f'{task["label"]}: attempt {attempt}/{self.max_attempts}')
-            cmd = ['ros2', 'run', 'robot_bringup', task['executable']]
+            cmd = [
+                'ros2', 'run', 'robot_bringup', task['executable'],
+                '--ros-args', '-p', f'discover_targets:={str(self.discover_targets).lower()}',
+            ]
             try:
                 ok = subprocess.run(cmd, timeout=self.task_timeout).returncode == 0
             except subprocess.TimeoutExpired:
@@ -127,16 +142,22 @@ class MissionSupervisor(Node):
         if ok:
             self.get_logger().info(f'{task["label"]}: SUCCESS in {self.results[room]["seconds"]:.0f} s')
         else:
-            # The task node only publishes /roomN/done on success; publish it here so
+            # The task node only publishes /room_X/done on success; publish it here so
             # doorway_navigator moves on instead of waiting forever.
             self.get_logger().error(f'{task["label"]}: FAILED after {self.max_attempts} attempts; '
                                     'continuing the mission')
             self.done_pubs[room].publish(Bool(data=True))
-        if room == 'room2':
-            self.set_status('returning_home')
+
+        if self.all_tasks_finished():
+            if self.exploration_done:
+                self.set_status('returning_home')
+            else:
+                self.set_status('finishing_map')
+        elif not self.exploration_done:
+            self.set_status('exploring')
 
     def check_home(self):
-        if self.finished or self.results['room2']['ok'] is None:
+        if self.finished or not self.exploration_done or not self.all_tasks_finished():
             return
         pos = self.robot_xy()
         if pos is None:
@@ -151,13 +172,14 @@ class MissionSupervisor(Node):
     def write_results(self, all_ok):
         row = {
             'date': datetime.now().isoformat(timespec='seconds'),
+            'task_order': '->'.join(self.task_order),
             'exploration_s': round(self.marks.get('exploration', float('nan')), 1),
-            'alpha_ok': self.results['room1']['ok'],
-            'alpha_attempts': self.results['room1']['attempts'],
-            'alpha_s': round(self.results['room1']['seconds'] or float('nan'), 1),
-            'beta_ok': self.results['room2']['ok'],
-            'beta_attempts': self.results['room2']['attempts'],
-            'beta_s': round(self.results['room2']['seconds'] or float('nan'), 1),
+            'alpha_ok': self.results['room_alpha']['ok'],
+            'alpha_attempts': self.results['room_alpha']['attempts'],
+            'alpha_s': round(self.results['room_alpha']['seconds'] or float('nan'), 1),
+            'beta_ok': self.results['room_beta']['ok'],
+            'beta_attempts': self.results['room_beta']['attempts'],
+            'beta_s': round(self.results['room_beta']['seconds'] or float('nan'), 1),
             'total_s': round(self.marks['total'], 1),
             'mission_success': all_ok,
         }
@@ -170,7 +192,7 @@ class MissionSupervisor(Node):
             writer.writerow(row)
         self.get_logger().info('=' * 60)
         self.get_logger().info(f'MISSION {"COMPLETE" if all_ok else "FINISHED WITH FAILURES"} '
-                               f'in {row["total_s"]:.0f} s (real time)')
+                               f'in {row["total_s"]:.0f} s (real time) | order={row["task_order"]}')
         self.get_logger().info(f'  exploration {row["exploration_s"]} s | '
                                f'Alpha {"OK" if row["alpha_ok"] else "FAILED"} ({row["alpha_s"]} s, '
                                f'{row["alpha_attempts"]} attempt(s)) | '

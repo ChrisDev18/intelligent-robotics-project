@@ -1,35 +1,29 @@
 #!/usr/bin/env python3
-"""Phase C: Room 1 (Alpha) Vacuum Cleaning Task Node.
+"""Phase C: Room Alpha Vacuum Cleaning Task Node.
 
-Supports two navigation modes selectable via parameter `use_nav2`:
-1. Closed-Loop / Direct /cmd_vel Mode (default: use_nav2:=false):
-   Uses the same proven closed-loop odometry/TF velocity driving as `beta_pick_place.py`
-   (`drive_to_pose_closed_loop`). Directly controls /cmd_vel with proportional heading
-   and distance control referencing get_pose() (map -> base_footprint with /odom fallback).
-   Works reliably without freezing, in both the full house and the practice world.
-2. Nav2 Simple Commander Mode (use_nav2:=true):
-   Uses BasicNavigator from `nav2_simple_commander` (goToPose) when full Nav2 stack
-   is active and localized.
+Supports two targeting modes selectable via parameter `discover_targets`:
+1. Autonomous Discovery Mode (`discover_targets:=true`, used by mission.launch.py):
+   Locates the Room Alpha slate-blue cleaning zone visually using the RGB-D camera,
+   TF (map -> rgbd_camera_optical_frame), and live SLAM /map (seeded from
+   /discovered/clean_zone and refined via active 360° scan / room viewpoints).
+   Uses known nominal dimensions (2.29 x 1.57 m) clamped to /map free space,
+   dynamically spawns dirt across the discovered zone, and sweeps it.
+2. Standalone / Parameter Mode (`discover_targets:=false`, default):
+   Uses the `clean_x_min/max`, `clean_y_min/max` parameters directly for
+   isolated testing.
 
-Target Cleaning Region:
-  x in [-13.6, -11.3] m  (width = 2.3 m)
-  y in [7.6, 9.1] m      (height = 1.5 m)
-  Inside Room 1 (Alpha, yellow floor).
-
-Features:
-  - Dynamic dirt spawning and real-time hoovering via Gazebo entity services.
-  - Parameter spawn_dirt:=true/false to toggle dirt particle generation.
-  - Parameter use_nav2:=true/false (default false) to switch between closed-loop driving and Nav2.
-  - Latched topic handoff via /room1/ready and /room1/done.
-  - Evaluation logging to log/alpha_cleaning_eval.csv.
+Supports both Nav2 Simple Commander (`use_nav2:=true`, default) and closed-loop
+/cmd_vel fallback (`drive_to_pose_closed_loop`).
 """
 
 import csv
 from datetime import datetime, timezone
+import json
 import math
 import os
 import sys
 import time
+import numpy as np
 
 import rclpy
 from rclpy.duration import Duration
@@ -39,13 +33,24 @@ from rclpy.time import Time
 
 from builtin_interfaces.msg import Duration as MsgDuration
 from geometry_msgs.msg import PoseStamped, Twist
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import OccupancyGrid, Odometry
+from sensor_msgs.msg import CameraInfo, Image, LaserScan
 from std_msgs.msg import Bool, Empty, String
 from tf2_ros import Buffer, TransformListener
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from ros_gz_interfaces.msg import Entity
 from ros_gz_interfaces.srv import DeleteEntity, SpawnEntity
+
+from robot_bringup.perception import (
+    classify_floor_color,
+    detect_clean_zone_points,
+    estimate_clean_zone_bounds,
+    intrinsics_from_camera_info,
+    sample_room_search_viewpoints,
+    select_approach_pose,
+    transform_stamped_to_matrix,
+)
 
 
 DIRT_SDF_TEMPLATE = """<?xml version="1.0" ?>
@@ -129,11 +134,14 @@ class AlphaCleaning(Node):
         # Declare Parameters
         self.declare_parameter('use_nav2', True)
         self.declare_parameter('wait_for_ready', False)
+        self.declare_parameter('discover_targets', False)
         self.declare_parameter('spawn_dirt', True)
         self.declare_parameter('clean_x_min', -13.6)
         self.declare_parameter('clean_x_max', -11.3)
         self.declare_parameter('clean_y_min', 7.6)
         self.declare_parameter('clean_y_max', 9.1)
+        self.declare_parameter('nominal_zone_sx', 2.29)
+        self.declare_parameter('nominal_zone_sy', 1.57)
         self.declare_parameter('lane_spacing', 0.22)
         self.declare_parameter('return_to_doorway', True)
         self.declare_parameter('spawn_x', 19.21)
@@ -149,15 +157,21 @@ class AlphaCleaning(Node):
         # Publishers & Subscriptions
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.vacuum_pub = self.create_publisher(Bool, '/vacuum/active', 10)
-        self.done_pub = self.create_publisher(Bool, '/room1/done', latched_qos)
+        self.done_pub = self.create_publisher(Bool, '/room_alpha/done', latched_qos)
         self.arm_pub = self.create_publisher(JointTrajectory, '/arm_controller/joint_trajectory', 10)
         self.detach_pub = self.create_publisher(Empty, '/beta_pick_item/detach', 10)
         self.eval_pub = self.create_publisher(String, '/alpha_cleaning/eval_metrics', latched_qos)
 
-        self.create_subscription(Bool, '/room1/ready', self._ready_cb, latched_qos)
+        self.create_subscription(Bool, '/room_alpha/ready', self._ready_cb, latched_qos)
         self.create_subscription(Odometry, '/odom', self._odom_cb, 10)
+        self.create_subscription(LaserScan, '/scan', self._scan_cb, 10)
+        self.create_subscription(Image, '/rgbd_camera/image', self._rgb_cb, 10)
+        self.create_subscription(Image, '/rgbd_camera/depth_image', self._depth_cb, 10)
+        self.create_subscription(CameraInfo, '/rgbd_camera/camera_info', self._cam_info_cb, 10)
+        self.create_subscription(OccupancyGrid, '/map', self._map_cb, latched_qos)
+        self.create_subscription(String, '/discovered/clean_zone', self._discovered_zone_cb, latched_qos)
 
-        # TF Buffer & Listener (identical to beta_pick_place.py)
+        # TF Buffer & Listener
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
@@ -165,9 +179,16 @@ class AlphaCleaning(Node):
         self.spawn_client = self.create_client(SpawnEntity, '/world/empty/create')
         self.delete_client = self.create_client(DeleteEntity, '/world/empty/remove')
 
-        self.room1_ready = False
+        self.room_alpha_ready = False
         self.vacuum_active = False
         self.odom_pose = None  # (x, y, yaw) from /odom
+        self.latest_scan = None
+        self.latest_rgb = None
+        self.latest_depth = None
+        self.camera_info = None
+        self.map_msg = None
+        self.discovered_zone_msg = None
+        self._rgb_seq = 0
 
         self.active_dirt = {}
         self.total_dirt_count = 0
@@ -183,13 +204,14 @@ class AlphaCleaning(Node):
             except Exception as e:
                 self.get_logger().warn(f'Could not initialize BasicNavigator ({e}); using closed-loop.')
 
-        mode_str = 'Nav2' if self.navigator is not None else 'Closed-Loop /cmd_vel (beta_pick_place style)'
-        self.get_logger().info(f'Alpha Cleaning initialized in [{mode_str}] mode.')
+        mode_str = 'Nav2' if self.navigator is not None else 'Closed-Loop /cmd_vel'
+        disc_str = 'autonomous-discovery' if self.get_parameter('discover_targets').value else 'parameter-coords'
+        self.get_logger().info(f'Alpha Cleaning initialized in [{mode_str} | {disc_str}] mode.')
 
     # --- Callbacks -----------------------------------------------------------
     def _ready_cb(self, msg: Bool):
         if msg.data:
-            self.room1_ready = True
+            self.room_alpha_ready = True
 
     def _odom_cb(self, msg: Odometry):
         p = msg.pose.pose.position
@@ -200,7 +222,80 @@ class AlphaCleaning(Node):
         if self.vacuum_active and self.active_dirt:
             self._check_hoover_dirt()
 
-    # --- Pose & TF Lookup (identical to beta_pick_place.py) -------------------
+    def _scan_cb(self, msg: LaserScan):
+        self.latest_scan = msg
+
+    def _rgb_cb(self, msg: Image):
+        if msg.encoding in ('rgb8', 'bgr8'):
+            arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
+            self.latest_rgb = arr if msg.encoding == 'rgb8' else arr[:, :, ::-1]
+            self._rgb_seq += 1
+
+    def _depth_cb(self, msg: Image):
+        if msg.encoding == '32FC1':
+            self.latest_depth = np.frombuffer(msg.data, dtype=np.float32).reshape(
+                msg.height, msg.width
+            )
+
+    def _cam_info_cb(self, msg: CameraInfo):
+        self.camera_info = msg
+
+    def _map_cb(self, msg: OccupancyGrid):
+        self.map_msg = msg
+
+    def _discovered_zone_cb(self, msg: String):
+        try:
+            self.discovered_zone_msg = json.loads(msg.data)
+        except Exception:
+            pass
+
+    # --- Pose, LiDAR, TF & Map Helpers ---------------------------------------
+    def _min_scan_in_arc(self, center_angle_rad: float, half_arc_rad: float = 0.50) -> float:
+        """Return min valid LiDAR range (>= 0.25 m) within an angular cone, or inf."""
+        s = self.latest_scan
+        if s is None or not s.ranges:
+            return math.inf
+        arr = np.asarray(s.ranges, dtype=np.float64)
+        angles = s.angle_min + np.arange(len(arr)) * s.angle_increment
+        diffs = np.abs(np.arctan2(np.sin(angles - center_angle_rad), np.cos(angles - center_angle_rad)))
+        mask = (diffs <= half_arc_rad) & np.isfinite(arr) & (arr >= 0.25)
+        if not np.any(mask):
+            return math.inf
+        return float(np.min(arr[mask]))
+
+    def nudge_clear_of_doorway(self, distance_m: float = 0.45, speed: float = 0.14):
+        """If starting straddled inside a narrow doorway, drive forward cleanly into the room."""
+        self.spin_for(0.3)
+        left_min = self._min_scan_in_arc(math.pi / 2.0, half_arc_rad=0.55)
+        right_min = self._min_scan_in_arc(-math.pi / 2.0, half_arc_rad=0.55)
+        front_min = self._min_scan_in_arc(0.0, half_arc_rad=0.45)
+
+        if not ((left_min < 0.78 and right_min < 0.78) or min(left_min, right_min) < 0.42):
+            return
+        if front_min < 0.70:
+            return
+
+        pose0 = self.get_pose()
+        if pose0 is None:
+            return
+        self.get_logger().info(
+            f'[Doorway Clear] Narrow sides (L={left_min:.2f} m, R={right_min:.2f} m, F={front_min:.2f} m); '
+            f'nudging {distance_m:.2f} m cleanly into Room Alpha...'
+        )
+        x0, y0, _ = pose0
+        twist = Twist()
+        twist.linear.x = abs(speed)
+        start = time.time()
+        while rclpy.ok() and (time.time() - start) < 15.0:
+            rclpy.spin_once(self, timeout_sec=0.02)
+            if self._min_scan_in_arc(0.0, half_arc_rad=0.45) < 0.40:
+                break
+            pose = self.get_pose()
+            if pose is not None and math.hypot(pose[0] - x0, pose[1] - y0) >= distance_m:
+                break
+            self.cmd_pub.publish(twist)
+        self.stop_base()
+
     def get_pose(self):
         """Return (x, y, yaw) in map frame if TF is available, else fallback to odom."""
         try:
@@ -215,6 +310,22 @@ class AlphaCleaning(Node):
         except Exception:
             return self.odom_pose
 
+    def get_cam_transform(self):
+        try:
+            t = self.tf_buffer.lookup_transform(
+                'map', 'rgbd_camera_optical_frame', Time(), timeout=Duration(seconds=0.1)
+            )
+            return transform_stamped_to_matrix(t)
+        except Exception:
+            return None
+
+    def get_map_array(self):
+        if self.map_msg is None:
+            return None, 0.0, 0.0, 0.05
+        info = self.map_msg.info
+        grid = np.array(self.map_msg.data, dtype=np.int16).reshape(info.height, info.width)
+        return grid, info.origin.position.x, info.origin.position.y, info.resolution
+
     def stop_base(self):
         for _ in range(3):
             self.cmd_pub.publish(Twist())
@@ -225,7 +336,139 @@ class AlphaCleaning(Node):
         while rclpy.ok() and time.time() < end:
             rclpy.spin_once(self, timeout_sec=0.04)
 
-    # --- Movement: Closed-Loop /cmd_vel (same as beta_pick_place.py) ----------
+    # --- Autonomous Visual Discovery -----------------------------------------
+    def _sample_clean_zone_frame(self, collected_pts: list):
+        if self.latest_rgb is None:
+            return 0
+        T_map_cam = self.get_cam_transform()
+        if T_map_cam is None:
+            return 0
+        intrinsics = intrinsics_from_camera_info(self.camera_info)
+        pts = detect_clean_zone_points(
+            self.latest_rgb, self.latest_depth, intrinsics, T_map_cam
+        )
+        if len(pts) > 0:
+            collected_pts.extend(pts.tolist())
+            return len(pts)
+        return 0
+
+    def _rotate_and_scan_clean_zone(self, collected_pts: list, target_angle: float = 2.0 * math.pi,
+                                    ang_vel: float = 0.60, timeout_sec: float = 40.0):
+        """Rotate in place while projecting any visible clean-zone mat pixels into map frame."""
+        pose0 = self.get_pose()
+        if pose0 is None:
+            return
+        prev_yaw = pose0[2]
+        turned = 0.0
+        last_seq = -1
+        start = time.time()
+        twist = Twist()
+        twist.angular.z = ang_vel
+
+        while rclpy.ok() and turned < target_angle and (time.time() - start) < timeout_sec:
+            for _ in range(10):
+                rclpy.spin_once(self, timeout_sec=0.0)
+            time.sleep(0.03)
+            self.cmd_pub.publish(twist)
+
+            pose = self.get_pose()
+            if pose is not None:
+                turned += abs(normalize_angle(pose[2] - prev_yaw))
+                prev_yaw = pose[2]
+
+            if self._rgb_seq != last_seq:
+                last_seq = self._rgb_seq
+                self._sample_clean_zone_frame(collected_pts)
+
+        self.stop_base()
+
+    def discover_clean_zone(self):
+        """Visually discover the Room Alpha cleaning zone bounds (x_min, x_max, y_min, y_max)."""
+        self.get_logger().info('[Discovery] Searching for Room Alpha cleaning zone mat via RGB-D...')
+        collected_pts = []
+
+        # 0. Ensure robot is clear of the narrow Room Alpha doorway before scanning/planning
+        self.nudge_clear_of_doorway()
+
+        # 1. Seed from passive detections accumulated by doorway_navigator during exploration
+        self.spin_for(0.5)
+        if self.discovered_zone_msg and self.discovered_zone_msg.get('points_sample'):
+            seed_pts = self.discovered_zone_msg['points_sample']
+            collected_pts.extend(seed_pts)
+            self.get_logger().info(
+                f'[Discovery] Seeded {len(seed_pts)} clean-zone points from passive mapper.'
+            )
+
+        # 2. Perform an initial 360-degree scan from the current pose inside Room Alpha
+        self._rotate_and_scan_clean_zone(collected_pts, target_angle=2.0 * math.pi + 0.15)
+        self.get_logger().info(
+            f'[Discovery] After initial 360° scan: {len(collected_pts)} mat points.'
+        )
+
+        # 3. If not found yet, visit reachable free-space viewpoints inside Room Alpha
+        if len(collected_pts) < 40:
+            grid, ox, oy, res = self.get_map_array()
+            pose = self.get_pose()
+            if grid is not None and pose is not None:
+                viewpoints = sample_room_search_viewpoints(
+                    (pose[0], pose[1]), grid, ox, oy, res,
+                    max_radius_m=5.5, min_clearance_m=0.42, spacing_m=1.6,
+                    max_points=5, forward_hint_yaw=pose[2],
+                )
+                self.get_logger().info(
+                    f'[Discovery] Mat not yet seen; checking {len(viewpoints)} room viewpoints...'
+                )
+                for idx, (vx, vy) in enumerate(viewpoints, start=1):
+                    self.navigate_to(vx, vy, 0.0, f'Alpha Search Viewpoint {idx}')
+                    if self.latest_rgb is not None:
+                        fl, _, _ = classify_floor_color(self.latest_rgb)
+                        if fl == 'GREEN':
+                            continue
+                    self._rotate_and_scan_clean_zone(collected_pts, target_angle=2.0 * math.pi)
+                    self.get_logger().info(
+                        f'[Discovery] Viewpoint {idx}: accumulated {len(collected_pts)} mat points.'
+                    )
+                    if len(collected_pts) >= 60:
+                        break
+
+        if len(collected_pts) < 20:
+            self.get_logger().error('[Discovery] Failed to visually detect Room Alpha cleaning zone!')
+            return None
+
+        # 4. If initial detections were far away (> 1.8 m), move closer for a crisp observation
+        pts_arr = np.asarray(collected_pts, dtype=np.float64)
+        init_c = np.median(pts_arr, axis=0)
+        pose = self.get_pose()
+        if pose is not None and math.hypot(pose[0] - init_c[0], pose[1] - init_c[1]) > 1.8:
+            grid, ox, oy, res = self.get_map_array()
+            obs_x, obs_y, obs_yaw = select_approach_pose(
+                float(init_c[0]), float(init_c[1]), 1.5, grid, ox, oy, res,
+                robot_xy=(pose[0], pose[1]), clearance_m=0.42, ignore_target_radius_m=0.0,
+            )
+            self.get_logger().info(
+                f'[Discovery] Moving closer to ({obs_x:.2f}, {obs_y:.2f}) to refine clean-zone bounds...'
+            )
+            self.navigate_to(obs_x, obs_y, obs_yaw, 'Clean Zone Refinement Viewpoint')
+            self._rotate_and_scan_clean_zone(collected_pts, target_angle=0.7, ang_vel=0.35, timeout_sec=12.0)
+            self._rotate_and_scan_clean_zone(collected_pts, target_angle=1.4, ang_vel=-0.35, timeout_sec=18.0)
+
+        grid, ox, oy, res = self.get_map_array()
+        bounds = estimate_clean_zone_bounds(
+            collected_pts,
+            nominal_sx=float(self.get_parameter('nominal_zone_sx').value),
+            nominal_sy=float(self.get_parameter('nominal_zone_sy').value),
+            grid=grid, origin_x=ox, origin_y=oy, resolution=res,
+        )
+        if bounds is not None:
+            self.get_logger().info(
+                f'[Discovery] Localized Clean Zone: '
+                f'x=[{bounds[0]:.2f}, {bounds[1]:.2f}], y=[{bounds[2]:.2f}, {bounds[3]:.2f}] '
+                f'({bounds[1] - bounds[0]:.2f} x {bounds[3] - bounds[2]:.2f} m, '
+                f'from {len(collected_pts)} floor points)'
+            )
+        return bounds
+
+    # --- Movement: Closed-Loop /cmd_vel --------------------------------------
     def drive_to_pose_closed_loop(
         self,
         target_x: float,
@@ -236,6 +479,7 @@ class AlphaCleaning(Node):
         max_lin: float = 0.22,
         max_ang: float = 0.70,
         timeout_sec: float = 60.0,
+        obstacle_guard: bool = True,
     ) -> bool:
         """Drive smoothly to (target_x, target_y, target_yaw) using /cmd_vel and get_pose()."""
         start = time.time()
@@ -271,6 +515,14 @@ class AlphaCleaning(Node):
                 if dist <= pos_tol:
                     phase = 'FINAL_YAW'
                     continue
+                if obstacle_guard and dist > 0.20:
+                    front_min = self._min_scan_in_arc(0.0, half_arc_rad=0.45)
+                    if front_min < 0.30:
+                        self.stop_base()
+                        self.get_logger().warn(
+                            f'[Closed-Loop Guard] Obstacle at {front_min:.2f} m ahead; stopping safely.'
+                        )
+                        return False
                 err_yaw = normalize_angle(heading_to_goal - yaw)
                 if abs(err_yaw) > 0.45 and dist > 0.12:
                     phase = 'ROTATE_TO_GOAL'
@@ -293,40 +545,61 @@ class AlphaCleaning(Node):
         self.stop_base()
         return False
 
-    def navigate_to(self, x: float, y: float, yaw: float, label: str = '') -> bool:
-        """Route to target using either Nav2 Simple Commander or beta_pick_place closed-loop."""
+    def navigate_to(self, x: float, y: float, yaw: float, label: str = '',
+                    nav2_timeout_sec: float = 90.0) -> bool:
+        """Route to target using Nav2 Simple Commander with timeout & safe fallback."""
         if label:
             self.get_logger().info(f'[Navigate] -> {label}: ({x:.2f}, {y:.2f}, yaw={yaw:.2f})')
 
-        # If Nav2 mode is enabled and navigator is active, try Nav2
         if self.navigator is not None:
-            pose = PoseStamped()
-            pose.header.frame_id = 'map'
-            pose.header.stamp = self.get_clock().now().to_msg()
-            pose.pose.position.x = float(x)
-            pose.pose.position.y = float(y)
-            pose.pose.orientation.z = math.sin(yaw / 2.0)
-            pose.pose.orientation.w = math.cos(yaw / 2.0)
-
-            self.navigator.goToPose(pose)
-            while not self.navigator.isTaskComplete():
-                # Process every queued message, not just one: /odom (50 Hz) is first in
-                # line and otherwise starves /tf, leaving the dirt check with a stale pose.
-                for _ in range(50):
-                    rclpy.spin_once(self, timeout_sec=0.0)
-                time.sleep(0.05)
-
             from nav2_simple_commander.robot_navigator import TaskResult
-            if self.navigator.getResult() == TaskResult.SUCCEEDED:
-                return True
-            self.get_logger().warn(f'Nav2 goal {label} did not succeed; using closed-loop fallback.')
+            for attempt in range(1, 3):
+                pose = PoseStamped()
+                pose.header.frame_id = 'map'
+                pose.header.stamp = Time().to_msg()
+                pose.pose.position.x = float(x)
+                pose.pose.position.y = float(y)
+                pose.pose.orientation.z = math.sin(yaw / 2.0)
+                pose.pose.orientation.w = math.cos(yaw / 2.0)
 
-        # Direct closed-loop driving (beta_pick_place style)
-        return self.drive_to_pose_closed_loop(x, y, yaw)
+                self.navigator.goToPose(pose)
+                start = time.time()
+                timed_out = False
+                while not self.navigator.isTaskComplete():
+                    for _ in range(50):
+                        rclpy.spin_once(self, timeout_sec=0.0)
+                    time.sleep(0.05)
+                    if (time.time() - start) > nav2_timeout_sec:
+                        self.get_logger().warn(
+                            f'Nav2 goal {label} timed out after {nav2_timeout_sec:.0f}s (attempt {attempt}); cancelling.'
+                        )
+                        self.navigator.cancelTask()
+                        timed_out = True
+                        break
+
+                if not timed_out and self.navigator.getResult() == TaskResult.SUCCEEDED:
+                    return True
+
+                self.get_logger().warn(f'Nav2 goal {label} did not succeed (attempt {attempt}); clearing costmaps.')
+                try:
+                    self.navigator.clearAllCostmaps()
+                except Exception:
+                    pass
+                self.spin_for(0.5)
+
+            cur = self.get_pose()
+            rem = math.hypot(x - cur[0], y - cur[1]) if cur is not None else math.inf
+            if rem > 1.2:
+                self.get_logger().warn(
+                    f'Skipping blind closed-loop fallback for {label} ({rem:.2f} m away).'
+                )
+                return False
+
+        return self.drive_to_pose_closed_loop(x, y, yaw, obstacle_guard=True)
 
     # --- Arm & Vacuum Controls -----------------------------------------------
     def detach_beta_cube(self):
-        """Ensure Gazebo's DetachableJoint is detached so the Room 2 cube is not dragged."""
+        """Ensure Gazebo's DetachableJoint is detached so the Room Beta cube is not dragged."""
         self.get_logger().info('Ensuring Beta cube DetachableJoint is detached...')
         for _ in range(4):
             self.detach_pub.publish(Empty())
@@ -356,9 +629,7 @@ class AlphaCleaning(Node):
 
     # --- Gazebo Dirt Management ----------------------------------------------
     def _hoover_pose(self):
-        """Robot pose in the map frame for the dirt check: the latest /odom pose (always
-        fresh) moved into the map frame by SLAM/AMCL's map->odom correction, which changes
-        slowly, so a slightly old value is fine. Falls back to get_pose()."""
+        """Robot pose in the map frame for the dirt check."""
         if self.odom_pose is None:
             return self.get_pose()
         try:
@@ -380,7 +651,6 @@ class AlphaCleaning(Node):
             return
 
         rx, ry, ryaw = pose
-        # Vacuum center is at x=-0.04m behind base_footprint
         vx = rx + self.VACUUM_OFFSET_X * math.cos(ryaw)
         vy = ry + self.VACUUM_OFFSET_X * math.sin(ryaw)
         cos_yaw, sin_yaw = math.cos(ryaw), math.sin(ryaw)
@@ -408,30 +678,29 @@ class AlphaCleaning(Node):
             req.entity.type = Entity.MODEL
             self.delete_client.call_async(req)
 
-    def spawn_dirt_grid(self):
+    def spawn_dirt_grid(self, x_min: float, x_max: float, y_min: float, y_max: float):
         if not self.spawn_client.wait_for_service(timeout_sec=2.5):
             self.get_logger().warn('Gazebo service /world/empty/create unavailable; skipping dirt spawn.')
             return
 
-        x_min = float(self.get_parameter('clean_x_min').value)
-        x_max = float(self.get_parameter('clean_x_max').value)
-        y_min = float(self.get_parameter('clean_y_min').value)
-        y_max = float(self.get_parameter('clean_y_max').value)
         spawn_x = float(self.get_parameter('spawn_x').value)
         spawn_y = float(self.get_parameter('spawn_y').value)
 
-        # 3x3 grid of dirt particles across the clean zone
-        dirt_coords = [
-            (-13.3, 7.85), (-12.4, 7.85), (-11.6, 7.85),
-            (-13.3, 8.35), (-12.4, 8.35), (-11.6, 8.35),
-            (-13.3, 8.85), (-12.4, 8.85), (-11.6, 8.85),
-        ]
+        mx_lo = x_min + min(0.30, 0.15 * (x_max - x_min))
+        mx_hi = x_max - min(0.30, 0.15 * (x_max - x_min))
+        my_lo = y_min + min(0.25, 0.18 * (y_max - y_min))
+        my_hi = y_max - min(0.25, 0.18 * (y_max - y_min))
+        xs = np.linspace(mx_lo, mx_hi, 3)
+        ys = np.linspace(my_lo, my_hi, 3)
+        dirt_coords = [(float(dx), float(dy)) for dy in ys for dx in xs]
 
-        self.get_logger().info(f'Spawning {len(dirt_coords)} dirt particles across clean zone...')
+        self.get_logger().info(
+            f'Spawning {len(dirt_coords)} dirt particles across clean zone '
+            f'x=[{x_min:.2f}, {x_max:.2f}], y=[{y_min:.2f}, {y_max:.2f}]...'
+        )
         self.active_dirt.clear()
         for idx, (dx, dy) in enumerate(dirt_coords, start=1):
             name = f'alpha_dirt_{idx}'
-            # Clean up old entity
             del_req = DeleteEntity.Request()
             del_req.entity.name = name
             del_req.entity.type = Entity.MODEL
@@ -454,11 +723,8 @@ class AlphaCleaning(Node):
         self.get_logger().info(f'Spawned {self.total_dirt_count} dirt particles.')
 
     # --- Lawnmower Coverage Generation ---------------------------------------
-    def generate_lawnmower_waypoints(self) -> list:
-        x_min = float(self.get_parameter('clean_x_min').value)
-        x_max = float(self.get_parameter('clean_x_max').value)
-        y_min = float(self.get_parameter('clean_y_min').value)
-        y_max = float(self.get_parameter('clean_y_max').value)
+    def generate_lawnmower_waypoints(self, x_min: float, x_max: float,
+                                     y_min: float, y_max: float) -> list:
         spacing = float(self.get_parameter('lane_spacing').value)
 
         x_west = x_min + 0.15
@@ -473,11 +739,9 @@ class AlphaCleaning(Node):
         for i in range(num_lanes):
             lane_y = y_start + i * actual_spacing
             if i % 2 == 0:
-                # Eastbound: West -> East
                 waypoints.append((x_west, lane_y, 0.0, f'Lane {i+1} West'))
                 waypoints.append((x_east, lane_y, 0.0, f'Lane {i+1} East'))
             else:
-                # Westbound: East -> West
                 waypoints.append((x_east, lane_y, math.pi, f'Lane {i+1} East'))
                 waypoints.append((x_west, lane_y, math.pi, f'Lane {i+1} West'))
 
@@ -486,7 +750,7 @@ class AlphaCleaning(Node):
     # --- Main Mission --------------------------------------------------------
     def execute_mission(self) -> bool:
         self.get_logger().info('=' * 60)
-        self.get_logger().info('Starting Room 1 (Alpha) Cleaning Mission...')
+        self.get_logger().info('Starting Room Alpha Cleaning Mission...')
         self.get_logger().info('=' * 60)
 
         # 1. Wait for initial robot pose (/odom or TF)
@@ -499,11 +763,17 @@ class AlphaCleaning(Node):
             self.get_logger().error('No robot pose received!')
             return False
 
-        # 2. Wait for /room1/ready if handoff enabled
+        # 2. Wait for /room_alpha/ready if handoff enabled
         if self.get_parameter('wait_for_ready').value:
-            self.get_logger().info('Waiting for /room1/ready trigger...')
-            while rclpy.ok() and not self.room1_ready:
+            self.get_logger().info('Waiting for /room_alpha/ready trigger...')
+            while rclpy.ok() and not self.room_alpha_ready:
                 rclpy.spin_once(self, timeout_sec=0.2)
+
+        discover = bool(self.get_parameter('discover_targets').value)
+        clean_x_min = float(self.get_parameter('clean_x_min').value)
+        clean_x_max = float(self.get_parameter('clean_x_max').value)
+        clean_y_min = float(self.get_parameter('clean_y_min').value)
+        clean_y_max = float(self.get_parameter('clean_y_max').value)
 
         mission_t0 = time.time()
         failure_reasons = []
@@ -513,20 +783,30 @@ class AlphaCleaning(Node):
             self.detach_beta_cube()
             self.move_arm_home()
 
-            # 4. Route from Hallway into Room 1 (Door 1 is at map x=-14.61, y=6.21)
-            cur_pose = self.get_pose()
-            if cur_pose and (cur_pose[1] < 6.40 or cur_pose[0] > -9.21):
-                self.get_logger().info('Routing from Hallway into Room 1 (Alpha)...')
-                self.navigate_to(-14.61, 5.20, math.pi / 2.0, 'Door 1 Hallway Approach')
-                self.navigate_to(-14.61, 7.40, 0.0, 'Inside Room 1 Entrance')
+            # 4. Determine target cleaning zone: either autonomous discovery or parameter coords
+            if discover:
+                bounds = self.discover_clean_zone()
+                if bounds is None:
+                    failure_reasons.append('clean_zone_not_found')
+                    return False
+                clean_x_min, clean_x_max, clean_y_min, clean_y_max = bounds
+            else:
+                # Standalone mode: route from Hallway into Room Alpha if outside
+                cur_pose = self.get_pose()
+                if cur_pose and (cur_pose[1] < 6.40 or cur_pose[0] > -9.21):
+                    self.get_logger().info('Routing from Hallway into Room Alpha...')
+                    self.navigate_to(-14.61, 5.20, math.pi / 2.0, 'Door Alpha Hallway Approach')
+                    self.navigate_to(-14.61, 7.40, 0.0, 'Inside Room Alpha Entrance')
 
-            # 5. Spawn dirt particles if requested
+            # 5. Spawn dirt particles inside the active clean zone
             if self.get_parameter('spawn_dirt').value:
-                self.spawn_dirt_grid()
+                self.spawn_dirt_grid(clean_x_min, clean_x_max, clean_y_min, clean_y_max)
                 self.spin_for(0.5)
 
             # 6. Generate Lawnmower Pattern and Execute
-            waypoints = self.generate_lawnmower_waypoints()
+            waypoints = self.generate_lawnmower_waypoints(
+                clean_x_min, clean_x_max, clean_y_min, clean_y_max
+            )
             first_wp = waypoints[0]
             self.navigate_to(first_wp[0], first_wp[1], first_wp[2], 'Clean Zone Entry')
 
@@ -541,11 +821,11 @@ class AlphaCleaning(Node):
             self.set_vacuum(False)
             self.get_logger().info('[Vacuum OFF] Cleaning coverage sweep completed!')
 
-            # 7. Return to Doorway if requested
-            if self.get_parameter('return_to_doorway').value:
-                self.navigate_to(-14.61, 7.40, -math.pi / 2.0, 'Room 1 Doorway Exit')
+            # 7. Return to doorway only in standalone non-discovery mode
+            if not discover and self.get_parameter('return_to_doorway').value:
+                self.navigate_to(-14.61, 7.40, -math.pi / 2.0, 'Room Alpha Doorway Exit')
 
-            # 8. Publish Completion Signal (/room1/done)
+            # 8. Publish Completion Signal (/room_alpha/done)
             for _ in range(3):
                 self.done_pub.publish(Bool(data=True))
                 self.spin_for(0.1)
@@ -560,7 +840,7 @@ class AlphaCleaning(Node):
             self.get_logger().info(
                 f'Alpha Cleaning COMPLETE in {total_time:.1f}s! '
                 f'Hoovered: {self.hoovered_count}/{self.total_dirt_count} ({dirt_ratio * 100.0:.1f}%) | '
-                f'/room1/done published.'
+                f'/room_alpha/done published.'
             )
             self.get_logger().info('=' * 60)
             return True
@@ -579,10 +859,10 @@ class AlphaCleaning(Node):
                 'timestamp_utc': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
                 'trial_id': 1,
                 'nav_mode': 'nav2' if self.navigator is not None else 'closed_loop',
-                'clean_x_min': float(self.get_parameter('clean_x_min').value),
-                'clean_x_max': float(self.get_parameter('clean_x_max').value),
-                'clean_y_min': float(self.get_parameter('clean_y_min').value),
-                'clean_y_max': float(self.get_parameter('clean_y_max').value),
+                'clean_x_min': f'{clean_x_min:.3f}',
+                'clean_x_max': f'{clean_x_max:.3f}',
+                'clean_y_min': f'{clean_y_min:.3f}',
+                'clean_y_max': f'{clean_y_max:.3f}',
                 'dirt_total': self.total_dirt_count,
                 'dirt_cleaned': self.hoovered_count,
                 'dirt_ratio': f'{(self.hoovered_count / max(1, self.total_dirt_count)):.2f}' if self.total_dirt_count > 0 else '1.00',
